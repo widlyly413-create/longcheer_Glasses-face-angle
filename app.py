@@ -84,7 +84,9 @@ def process_image_v15(image_bytes):
                     M = cv2.moments(cnt)
                     if M["m00"] != 0:
                         cX, cY = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
-                        centers.append((cX, cY))
+                        # 区域限制：只保留水平方向 35%-65% 范围内的点
+                        if 0.35 * w < cX < 0.65 * w:
+                            centers.append((cX, cY))
 
     # ==========================================
     # 步骤 5：【新增】失败容错绘制逻辑
