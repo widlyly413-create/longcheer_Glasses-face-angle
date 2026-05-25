@@ -7,9 +7,9 @@ import os
 import pandas as pd
 from datetime import datetime
 
-# --- 核心算法层：自适应内核 + 无区域限制 + 垂直对齐过滤 ---
-def process_image_v12(image_bytes):
-    # 1. 图像解码 (支持中文路径与二进制流)
+# --- 核心算法层：先找圆点，再过黑域（不破坏圆度） ---
+def process_image_v13(image_bytes):
+    # 1. 图像解码
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if img is None: 
@@ -17,90 +17,88 @@ def process_image_v12(image_bytes):
     
     h, w = img.shape[:2]
     
-    # --- 动态比例因子 (基于图片宽度的精细化标注) ---
+    # --- 动态比例因子 (自适应极细工业级标注) ---
     dyn_radius = max(3, int(w / 180))      
     dyn_line = max(1, int(w / 700))        
     dyn_font_scale = w / 1600              
     dyn_font_thick = max(1, int(w / 900))  
 
-    # 2. 图像颜色空间转换
+    # 2. 转换为 HSV 颜色空间
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
     # ==========================================
-    # 核心步骤 1：提取黑色镜框安全区域
+    # 步骤 1：构建黑色镜框“安全参考区”
     # ==========================================
     lower_black = np.array([0, 0, 0])
     upper_black = np.array([180, 255, 65]) 
     black_mask = cv2.inRange(hsv, lower_black, upper_black)
     
-    # 对黑色镜框区域进行轻微膨胀，包裹住贴在边缘的红点
-    kernel_dilate = np.ones((7, 7), np.uint8)
+    # 将黑色镜框蒙版向外膨胀 11 像素，确保有足够宽的“合法安全带”能罩住红点中心
+    kernel_dilate = np.ones((11, 11), np.uint8)
     black_mask_expanded = cv2.dilate(black_mask, kernel_dilate, iterations=1)
 
     # ==========================================
-    # 核心步骤 2：提取红色贴点 (严格匹配验证过的阈值)
+    # 步骤 2：在全图提取纯红点 (不加黑框干扰，维持完美圆度)
     # ==========================================
     lower_red1, upper_red1 = np.array([0, 100, 70]), np.array([10, 255, 255])
     lower_red2, upper_red2 = np.array([170, 120, 100]), np.array([180, 255, 255])
     red_mask = cv2.add(cv2.inRange(hsv, lower_red1, upper_red1), 
-                   cv2.inRange(hsv, lower_red2, upper_red2))
+                       cv2.inRange(hsv, lower_red2, upper_red2))
     
-    # --- 【重大更新】：动态计算形态学开运算内核大小 ---
-    # 解决低分辨率图片中，固定的 5x5 内核会把变小的红点当成噪点擦除的问题
+    # 动态内核开运算：小图用 3x3 防误杀，大图用 5x5
     kernel_size = 3 if w < 1500 else 5
     kernel_open = np.ones((kernel_size, kernel_size), np.uint8)
-    red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel_open)
+    red_mask_opened = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel_open)
 
     # ==========================================
-    # 核心步骤 3：蒙版融合 (黑域锚定，剔除皮肤干扰)
+    # 步骤 3：轮廓提取与“双因子”校验 (圆度 + 位置锚定)
     # ==========================================
-    final_mask = cv2.bitwise_and(red_mask, black_mask_expanded)
-
-    # 3. 几何过滤
-    contours, _ = cv2.findContours(final_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(red_mask_opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     centers = []
     
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        # 限制面积区间
-        if 40 < area < 2500:
+        # 宽容的面积筛选
+        if 40 < area < 3000:
             perimeter = cv2.arcLength(cnt, True)
             if perimeter == 0: continue
             circularity = 4 * np.pi * (area / (perimeter * perimeter))
             
-            # 圆度门槛
-            if circularity >= 0.45:
+            # 由于未进行提前相交，这里的红点能够展现出 0.5 以上的完美圆度
+            if circularity >= 0.5:
                 x, y, bw, bh = cv2.boundingRect(cnt)
                 aspect_ratio = float(bw) / bh
-                # 长宽比过滤
+                
                 if 0.6 < aspect_ratio < 1.5:
                     M = cv2.moments(cnt)
                     if M["m00"] != 0:
                         cX = int(M["m10"] / M["m00"])
                         cY = int(M["m01"] / M["m00"])
-                        # --- 【重大更新】：完全移除对 cX 的水平视场区域限制 ---
-                        centers.append((cX, cY))
+                        
+                        # --- 核心改进：中心坐标黑域检验 ---
+                        # 检查红点的几何中心点是否位于膨胀后的镜框安全区内。255表示处于黑区
+                        if black_mask_expanded[cY, cX] == 255:
+                            # 彻底移除原先的 [0.35w - 0.65w] 水平限制
+                            centers.append((cX, cY))
 
-    # 4. 点数校验与垂直共线优选
+    # 4. 点数判定与三点共线垂直优选
     num_pts = len(centers)
     if num_pts < 3:
-        return img, 0, f"识别失败：镜框区域内仅找到 {num_pts} 个符合条件的点"
+        return img, 0, f"识别失败：镜框内仅提取到 {num_pts} 个合规点"
     
-    # 坐标按 Y 轴（上下）方向排序
+    # 纵向对齐排序
     centers = sorted(centers, key=lambda x: x[1])
-    
     best_set = None
     min_x_diff = float('inf')
     
-    # 如果刚好3个点，直接取用；如果由于干扰产生4个点以上，找出 X 轴最排成一条直线的一组
     if len(centers) == 3:
         best_set = centers
     else:
+        # 如果依然有干扰，找出在 X 轴最接近垂直直线的一组三点
         for i in range(len(centers)-2):
             for j in range(i+1, len(centers)-1):
                 for k in range(j+1, len(centers)):
                     pts = [centers[i], centers[j], centers[k]]
-                    # 计算这三点 X 轴的最大离散极差
                     x_range = max(p[0] for p in pts) - min(p[0] for p in pts)
                     if x_range < min_x_diff:
                         min_x_diff = x_range
@@ -108,13 +106,13 @@ def process_image_v12(image_bytes):
                         
     p1, p2, p3 = best_set
     
-    # 5. 几何向量计算角度
+    # 5. 几何向量法角度解算
     v1 = np.array([p1[0]-p2[0], p1[1]-p2[1]])
     v2 = np.array([p3[0]-p2[0], p3[1]-p2[1]])
     cos_theta = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
     angle = np.degrees(np.arccos(np.clip(cos_theta, -1.0, 1.0)))
     
-    # 6. 专业级极细标注绘制
+    # 6. 精细绘制标注
     font = cv2.FONT_HERSHEY_DUPLEX
     cv2.line(img, p1, p2, (255, 120, 0), dyn_line, cv2.LINE_AA)
     cv2.line(img, p2, p3, (255, 120, 0), dyn_line, cv2.LINE_AA)
@@ -125,39 +123,36 @@ def process_image_v12(image_bytes):
 
     text = f"ANGLE: {angle:.2f} DEG"
     text_pos = (p2[0] + 40, p2[1])
-    # 黑色文字阴影
     cv2.putText(img, text, text_pos, font, dyn_font_scale, (0,0,0), dyn_font_thick+2, cv2.LINE_AA)
-    # 白色主字体
     cv2.putText(img, text, text_pos, font, dyn_font_scale, (255,255,255), dyn_font_thick, cv2.LINE_AA)
     
     return img, angle, "成功"
 
-# --- Streamlit UI 交互控制层 ---
-st.set_page_config(page_title="WrapAngle V12", layout="wide")
-st.title("👓 面弯角高精度全自动标注系统 (V12 终极版)")
-st.caption("当前版本已移除画面区域限制，完美自适应大图与微信压缩小图。")
+# --- Streamlit 界面层 (支持单图/批量/历史CSV下载) ---
+st.set_page_config(page_title="WrapAngle V13", layout="wide")
+st.title("👓 面弯角高精度全自动测量系统 (V13)")
+st.caption("最新升级：基于圆度恢复与黑域校验融合算法，完美兼容各类倾斜和低清压缩图。")
 
 if 'history' not in st.session_state:
     st.session_state.history = []
 
-tab1, tab2 = st.tabs(["📸 单图实时上传检测", "📦 压缩包批量处理 (Zip)"])
+tab1, tab2 = st.tabs(["📸 单图实时测定", "📦 压缩包批量解析"])
 
-# --- 选项卡 1：单图处理 ---
 with tab1:
-    single_file = st.file_uploader("请上传单张眼镜俯拍图", type=['jpg', 'jpeg', 'png'], key="single")
+    single_file = st.file_uploader("上传单张俯视图", type=['jpg', 'jpeg', 'png'], key="single")
     if single_file:
-        res_img, ang, status = process_image_v12(single_file.read())
+        res_img, ang, status = process_image_v13(single_file.read())
         
         col_img, col_info = st.columns([2, 1])
         with col_img:
-            st.image(cv2.cvtColor(res_img, cv2.COLOR_BGR2RGB), caption="自适应精细化测量预览")
+            st.image(cv2.cvtColor(res_img, cv2.COLOR_BGR2RGB), caption="精细化结果展示")
         with col_info:
-            st.subheader("📋 诊断与数据")
+            st.subheader("📊 诊断结果")
             if status == "成功":
                 st.success(f"计算面弯角: {ang:.2f}°")
                 if not any(d['文件名'] == single_file.name for d in st.session_state.history):
                     st.session_state.history.append({
-                        "操作时间": datetime.now().strftime("%H:%M:%S"),
+                        "测定时间": datetime.now().strftime("%H:%M:%S"),
                         "文件名": single_file.name,
                         "面弯角角度": f"{ang:.2f}°",
                         "诊断状态": "成功"
@@ -165,9 +160,8 @@ with tab1:
             else:
                 st.error(status)
 
-# --- 选项卡 2：批量 Zip 处理 ---
 with tab2:
-    zip_file = st.file_uploader("请上传包含图片的 Zip 压缩包", type="zip", key="zip")
+    zip_file = st.file_uploader("上传 Zip 图片压缩包", type="zip", key="zip")
     if zip_file:
         out_zip = io.BytesIO()
         with zipfile.ZipFile(zip_file, "r") as z_in, zipfile.ZipFile(out_zip, "w") as z_out:
@@ -175,7 +169,7 @@ with tab2:
             
             p_bar = st.progress(0)
             for i, f_name in enumerate(files):
-                res_img, ang, status = process_image_v12(z_in.read(f_name))
+                res_img, ang, status = process_image_v13(z_in.read(f_name))
                 if res_img is not None:
                     _, buf = cv2.imencode(".jpg", res_img)
                     z_out.writestr(f"Result_{os.path.basename(f_name)}", buf.tobytes())
@@ -186,22 +180,18 @@ with tab2:
                         "诊断状态": status
                     })
                 p_bar.progress((i + 1) / len(files))
-        st.success("批量图片处理完成！")
-        st.download_button("📥 点击下载处理后的图片包 (Zip)", out_zip.getvalue(), "Batch_Results_V12.zip")
+        st.success("批量数据解析完毕！")
+        st.download_button("📥 导出标注图片包 (Zip)", out_zip.getvalue(), "Measurement_Results_V13.zip")
 
-# --- 实验历史数据大盘 ---
+# --- 实验报表导出 ---
 st.divider()
-st.subheader("📜 大漆工艺优化研究·操作历史记录")
+st.subheader("📜 本次项目数据报表")
 if st.session_state.history:
-    df_history = pd.DataFrame(st.session_state.history)
-    st.dataframe(df_history, use_container_width=True)
-    
-    # 转换为 CSV
-    csv_data = df_history.to_csv(index=False).encode('utf-8-sig')
-    st.download_button("📊 导出历史数据为 Excel/CSV 表格", csv_data, "measurement_history_v12.csv", "text/csv")
-    
-    if st.button("🗑️ 清空本次缓存数据"):
+    df_h = pd.DataFrame(st.session_state.history)
+    st.dataframe(df_h, use_container_width=True)
+    st.download_button("📊 导出历史数据表格 (Excel/CSV)", df_h.to_csv(index=False).encode('utf-8-sig'), "data_history_v13.csv", "text/csv")
+    if st.button("🗑️ 清空所有表格数据"):
         st.session_state.history = []
         st.rerun()
 else:
-    st.write("暂无历史记录，等待上传图片数据...")
+    st.write("等待上传实验样本图片...")
