@@ -44,8 +44,10 @@ def process_image_v11(image_bytes):
     lower_red2, upper_red2 = np.array([170, 120, 100]), np.array([180, 255, 255])
     red_mask = cv2.add(cv2.inRange(hsv, lower_red1, upper_red1), cv2.inRange(hsv, lower_red2, upper_red2))
     
-    # 验证过的开运算降噪
-    kernel_open = np.ones((5, 5), np.uint8)
+    # 动态自适应形态学降噪内核
+    # 小图用 3x3 避免擦除红点，大图用 5x5 增强降噪效果
+    kernel_size = 3 if w < 1500 else 5
+    kernel_open = np.ones((kernel_size, kernel_size), np.uint8)
     red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel_open)
 
     # ==========================================
