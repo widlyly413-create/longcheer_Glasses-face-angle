@@ -45,10 +45,10 @@ def process_image_v16(image_bytes):
     black_filled = cv2.dilate(black_filled, kernel_dilate, iterations=1)
 
     # ==========================================
-    # 步骤 2：提取红色区域
+    # 步骤 2：提取红色区域（扩大色相范围以提高识别率）
     # ==========================================
-    lower_red1, upper_red1 = np.array([0, 100, 70]), np.array([10, 255, 255])
-    lower_red2, upper_red2 = np.array([170, 120, 100]), np.array([180, 255, 255])
+    lower_red1, upper_red1 = np.array([0, 80, 50]), np.array([15, 255, 255])
+    lower_red2, upper_red2 = np.array([165, 80, 50]), np.array([180, 255, 255])
     red_mask = cv2.add(cv2.inRange(hsv, lower_red1, upper_red1), 
                        cv2.inRange(hsv, lower_red2, upper_red2))
 
