@@ -58,7 +58,6 @@ def process_image_v11(image_bytes):
     # 4. 几何约束过滤
     contours, _ = cv2.findContours(final_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     centers = []
-    ROI_X_MIN, ROI_X_MAX = 0.35, 0.65
     
     for cnt in contours:
         area = cv2.contourArea(cnt)
@@ -71,8 +70,7 @@ def process_image_v11(image_bytes):
                 if M["m00"] != 0:
                     cX = int(M["m10"] / M["m00"])
                     cY = int(M["m01"] / M["m00"])
-                    if w * ROI_X_MIN < cX < w * ROI_X_MAX:
-                        centers.append((cX, cY))
+                    centers.append((cX, cY))
 
     if len(centers) < 3:
         return img, 0, f"识别失败：镜框内仅识别到 {len(centers)} 个点"
