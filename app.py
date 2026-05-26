@@ -51,15 +51,15 @@ def process_image_v17(image_bytes):
     # 步骤 2：强色差纯红提取（无视皮肤红斑与暗红压痕）
     # ==========================================
     # 过滤掉低饱和度的肉色
-    lower_red1, upper_red1 = np.array([0, 130, 90]), np.array([15, 255, 255])
-    lower_red2, upper_red2 = np.array([165, 130, 90]), np.array([180, 255, 255])
+    lower_red1, upper_red1 = np.array([0, 90, 90]), np.array([15, 255, 255])
+    lower_red2, upper_red2 = np.array([165, 90, 90]), np.array([180, 255, 255])
     red_mask_hsv = cv2.add(cv2.inRange(hsv, lower_red1, upper_red1), 
                            cv2.inRange(hsv, lower_red2, upper_red2))
 
     # 核心抗干扰：红绿通道差值滤镜（纯红点 R 远大于 G，而皮肤 R 和 G 很接近）
     b, g, r = cv2.split(img)
     rg_diff = cv2.subtract(r, g)
-    _, red_mask_diff = cv2.threshold(rg_diff, 55, 255, cv2.THRESH_BINARY)
+    _, red_mask_diff = cv2.threshold(rg_diff, 40, 255, cv2.THRESH_BINARY)
 
     # 交集运算锁定高纯度红色
     red_mask = cv2.bitwise_and(red_mask_hsv, red_mask_diff)
