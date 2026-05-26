@@ -180,7 +180,7 @@ def process_image_v17(image_bytes):
 
 # --- Streamlit UI 层 ---
 st.set_page_config(page_title="WrapAngle V17", layout="wide")
-st.title("👓 面弯角测量系统 (V17 缝合增强版)")
+st.title("👓 面弯角自动测量系统")
 
 if 'history' not in st.session_state:
     st.session_state.history = []
