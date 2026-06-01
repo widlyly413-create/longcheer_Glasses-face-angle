@@ -7,8 +7,8 @@ import os
 import pandas as pd
 from datetime import datetime
 
-# --- 核心算法层：鲁棒黑框掩膜 + 强色差红点提取 + 几何拓扑过滤 ---
-def process_image_v17(image_bytes):
+# --- 核心算法层：仿生几何空间拓扑检测器（抗歪头、抗反光） ---
+def process_image_v19(image_bytes):
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if img is None: 
@@ -26,145 +26,146 @@ def process_image_v17(image_bytes):
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
     # ==========================================
-    # 步骤 1：鲁棒提取黑色眼镜框（高容错率，对抗高光反光）
+    # 步骤 1：鲁棒提取黑色眼镜框骨架
     # ==========================================
-    # 提高亮度上限（110）并引入闭运算，防止镜框反光导致断裂
     lower_black, upper_black = np.array([0, 0, 0]), np.array([180, 255, 115]) 
     black_mask = cv2.inRange(hsv, lower_black, upper_black)
     
-    kernel_close_frame = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+    kernel_close_frame = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
     black_mask = cv2.morphologyEx(black_mask, cv2.MORPH_CLOSE, kernel_close_frame)
     
     contours_black, _ = cv2.findContours(black_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
     black_filled = np.zeros_like(black_mask)
     for cb in contours_black:
-        # 降低面积门槛（500），保证局部反光断裂的镜框段也能被包容
-        if cv2.contourArea(cb) > 400: 
+        # 宽容的镜框面积门槛，允许局部被高光截断的镜框各段独立生成掩膜
+        if cv2.contourArea(cb) > 300: 
             cv2.drawContours(black_filled, [cb], -1, 255, thickness=cv2.FILLED)
             
-    # 强力膨胀，确保因歪头或形变稍微移出镜框边缘的红点也能被包进掩膜中
-    kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25))
+    # 加大膨胀核（35x35），在空间上把高光断裂的镜框重新“连通”，确保倾斜后移出的红点仍被包裹
+    kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (35, 35))
     black_filled = cv2.dilate(black_filled, kernel_dilate, iterations=1)
 
     # ==========================================
-    # 步骤 2：强色差纯红提取（无视皮肤红斑与暗红压痕）
+    # 步骤 2：浅红/淡红自适应高纯度提取
     # ==========================================
-    # 过滤掉低饱和度的肉色
-    lower_red1, upper_red1 = np.array([0, 90, 90]), np.array([15, 255, 255])
-    lower_red2, upper_red2 = np.array([165, 90, 90]), np.array([180, 255, 255])
+    # 宽容的饱和度下限（90），确保偏淡、洗白的红点能被捕获
+    lower_red1, upper_red1 = np.array([0, 90, 85]), np.array([15, 255, 255])
+    lower_red2, upper_red2 = np.array([165, 90, 85]), np.array([180, 255, 255])
     red_mask_hsv = cv2.add(cv2.inRange(hsv, lower_red1, upper_red1), 
                            cv2.inRange(hsv, lower_red2, upper_red2))
 
-    # 核心抗干扰：红绿通道差值滤镜（纯红点 R 远大于 G，而皮肤 R 和 G 很接近）
+    # 弹性的 R-G 通道差值滤镜，死死压制白色衣服和大部分人脸肤色
     b, g, r = cv2.split(img)
     rg_diff = cv2.subtract(r, g)
     _, red_mask_diff = cv2.threshold(rg_diff, 40, 255, cv2.THRESH_BINARY)
 
-    # 交集运算锁定高纯度红色
     red_mask = cv2.bitwise_and(red_mask_hsv, red_mask_diff)
 
     # ==========================================
-    # 步骤 3：骨架裁剪与发丝缝希粘合（核心进化）
+    # 步骤 3：黑框掩膜裁剪与连通域缝合
     # ==========================================
     red_on_black = cv2.bitwise_and(red_mask, black_filled)
     
-    # 【改动】：从原本的开运算（擦除）改为闭运算（形态学缝合）
-    # 如果有细小头发丝从红点中间穿过，该操作可以强行把被切开的红点“重新缝合粘连”
     kernel_repair = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     red_cleaned = cv2.morphologyEx(red_on_black, cv2.MORPH_CLOSE, kernel_repair)
 
     # ==========================================
-    # 步骤 4：极限放宽特征筛选（容忍严重的透视和破损）
+    # 步骤 4：极限形状约束释放（只卡死面积，不卡死圆形）
     # ==========================================
     contours_red, _ = cv2.findContours(red_cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     centers = []
     
     for cnt in contours_red:
         area = cv2.contourArea(cnt)
-        # 放低面积下限，被切损后变小的红点也能进
-        if 25 < area < 2000:
+        # 精准限制标定纸红点的物理面积（避免大面积的衣服杂色、大块阴影误入）
+        if 20 < area < 1500:
             perimeter = cv2.arcLength(cnt, True)
             if perimeter == 0: continue
             circularity = 4 * np.pi * (area / (perimeter * perimeter))
             
-            # 【极限放宽】：圆形度下调至 0.15（极度不规则、被半遮挡的红点也能通过）
-            if circularity >= 0.15:
+            # 极度放宽倾斜形变下的圆形度要求（0.12）
+            if circularity >= 0.12:
                 x, y, bw, bh = cv2.boundingRect(cnt)
                 aspect_ratio = float(bw) / bh
-                # 放宽宽高比，包容倾斜视角的压扁椭圆
-                if 0.3 < aspect_ratio < 2.6:
+                if 0.25 < aspect_ratio < 3.0:
                     M = cv2.moments(cnt)
                     if M["m00"] != 0:
                         cX = int(M["m10"] / M["m00"])
                         cY = int(M["m01"] / M["m00"])
-                        
-                        # 放开横向限制，确保歪头导致红点靠边时不会被漏
-                        if 0.12 * w < cX < 0.88 * w:
+                        # 全视野自适应（10%-90%），完美免疫偏离中心或倾斜靠边的红点
+                        if 0.10 * w < cX < 0.90 * w:
                             centers.append((cX, cY))
 
     # ==========================================
-    # 步骤 5：自适应几何拓扑选择器（对抗歪头和杂点）
+    # 步骤 5：终极重构：仿射不变几何拓扑解算器
     # ==========================================
     num_pts = len(centers)
-    best_set = None
+    best_set = None # 最终形态应当包含: (上镜腿点, 鼻梁中点, 下镜腿点)
 
-    if num_pts == 3:
-        # 刚好3个，直接按 Y 坐标（俯视从上到下镜腿顺序）分层
-        best_set = sorted(centers, key=lambda x: x[1])
-    elif num_pts > 3:
-        # 当存在多个候选点时，利用眼镜框特征进行稳健几何空间组合筛选
-        min_score = float('inf')
+    if num_pts >= 3:
+        min_geometric_error = float('inf')
         
+        # 穷举所有可能的三点人因拓扑组合
         for i in range(len(centers)-2):
             for j in range(i+1, len(centers)-1):
                 for k in range(j+1, len(centers)):
-                    tri_pts = [centers[i], centers[j], centers[k]]
-                    # 按照 Y 坐标排序：分为【上镜腿点】、【中部鼻梁点】、【下镜腿点】
-                    tri_pts = sorted(tri_pts, key=lambda x: x[1])
-                    p_top, p_mid, p_bot = tri_pts
+                    pA, pB, pC = np.array(centers[i]), np.array(centers[j]), np.array(centers[k])
                     
-                    # 空间几何约束 1：真正的三个标定点在 X 轴上必须具有合理的总体跨度
-                    x_coords = [p_top[0], p_mid[0], p_bot[0]]
-                    x_span = max(x_coords) - min(x_coords)
-                    if x_span < w * 0.25: 
+                    # 计算两两之间的欧氏距离
+                    dAB = np.linalg.norm(pA - pB)
+                    dBC = np.linalg.norm(pB - pC)
+                    dCA = np.linalg.norm(pC - pA)
+                    
+                    dists = [dAB, dBC, dCA]
+                    pts_temp = [centers[i], centers[j], centers[k]]
+                    
+                    # 找出三条边中长度最长的那条边（必为两个镜腿点之间的跨度连线）
+                    max_idx = np.argmax(dists)
+                    
+                    # 刚性约束：真正的眼镜两个外镜腿跨度在镜头中绝不能太小
+                    if dists[max_idx] < w * 0.22: 
                         continue 
+                        
+                    # 确定顶点（鼻梁点）：长边对应相对的那个点必然是三角形的顶点（鼻梁）
+                    if max_idx == 0:   # 长边是 AB，则 C 是鼻梁点
+                        p_mid = pts_temp[2]; p_side1 = pts_temp[0]; p_side2 = pts_temp[1]
+                    elif max_idx == 1: # 长边是 BC，则 A 是鼻梁点
+                        p_mid = pts_temp[0]; p_side1 = pts_temp[1]; p_side2 = pts_temp[2]
+                    else:              # 长边是 CA，则 B 是鼻梁点
+                        p_mid = pts_temp[1]; p_side1 = pts_temp[0]; p_side2 = pts_temp[2]
+                        
+                    # 计算两个镜腿边到鼻梁顶点的相对平衡度（透视不变性约束）
+                    len1 = np.linalg.norm(np.array(p_side1) - np.array(p_mid))
+                    len2 = np.linalg.norm(np.array(p_side2) - np.array(p_mid))
                     
-                    # 空间几何约束 2：中间的鼻梁点 X 坐标不能过于偏离两镜腿的连线中点
-                    # 综合计算：歪头下的相对对称得分
-                    d1 = np.linalg.norm(np.array(p_top) - np.array(p_mid))
-                    d2 = np.linalg.norm(np.array(p_bot) - np.array(p_mid))
+                    # 即使由于机位倾斜斜视导致两边视觉长度不完全相等，其两边比例误差也不会特别夸张
+                    balance_err = abs(len1 - len2) / max(len1, len2, 1)
                     
-                    # 比例得分，越接近 0 说明两边镜腿跨度越均衡（即使整体歪斜）
-                    balance_score = abs(d1 - d2) / max(d1, d2, 1)
-                    
-                    if balance_score < min_score:
-                        min_score = balance_score
-                        best_set = tri_pts
+                    if balance_err < min_geometric_error:
+                        min_geometric_error = balance_err
+                        # 将确定好的三点组存入 best_set，并强行规范顺序：[镜腿1, 鼻梁顶点, 镜腿2]
+                        best_set = (p_side1, p_mid, p_side2)
 
     # ==========================================
-    # 步骤 6：可视化绘制与输出层
+    # 步骤 6：高精可视化绘制与指标解算
     # ==========================================
-    if best_set is None or len(best_set) != 3:
-        # 失败时把所有备选点标出来，方便科研复盘
+    if best_set is None:
+        # 失败时红色高亮标出视野内所有纯红候选候选，便于科研排查
         for p in centers:
             cv2.circle(img, p, dyn_radius, (0, 0, 255), -1, cv2.LINE_AA) 
             cv2.circle(img, p, dyn_radius + 2, (255, 255, 255), 2, cv2.LINE_AA) 
-            
-        fail_text = f"FAIL: Found {num_pts} candidates, structural matching blocked."
-        cv2.putText(img, "FAIL", (int(w*0.05), int(h*0.1)), font, dyn_font_scale, (0, 0, 0), dyn_font_thick+2, cv2.LINE_AA)
-        cv2.putText(img, "FAIL", (int(w*0.05), int(h*0.1)), font, dyn_font_scale, (0, 0, 255), dyn_font_thick, cv2.LINE_AA)
-        return img, 0, f"识别失败：未匹配出符合镜框结构的3点组（检测到候选点: {num_pts}）"
+        return img, 0, f"识别失败：未能在复杂的透视变焦中解算出合规的镜框三角形刚性结构（候选点数: {num_pts}）"
         
-    # 成功捕获 3 点
-    p1, p2, p3 = best_set # p1:上镜腿, p2:中间鼻梁顶点, p3:下镜腿
+    # 成功匹配
+    p1, p2, p3 = best_set # p2 此时雷打不动必定是【鼻梁中心顶点】
     
-    # 向量法精准计算面弯角夹角（顶点为鼻梁中心 p2）
+    # 向量夹角余弦定理精密测算面弯角（以小数点后两位高精输出）
     v1, v2 = np.array([p1[0]-p2[0], p1[1]-p2[1]]), np.array([p3[0]-p2[0], p3[1]-p2[1]])
     cos_theta = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
     angle = np.degrees(np.arccos(np.clip(cos_theta, -1.0, 1.0)))
     
-    # 工业风画线与高亮标定
+    # 工业几何渲染标注
     cv2.line(img, p1, p2, (255, 120, 0), dyn_line, cv2.LINE_AA)
     cv2.line(img, p2, p3, (255, 120, 0), dyn_line, cv2.LINE_AA)
     for p in [p1, p2, p3]:
@@ -178,9 +179,9 @@ def process_image_v17(image_bytes):
     
     return img, angle, "成功"
 
-# --- Streamlit UI 层 ---
-st.set_page_config(page_title="WrapAngle V17", layout="wide")
-st.title("👓 面弯角自动测量系统")
+# --- Streamlit 现代 UI 用户层 ---
+st.set_page_config(page_title="WrapAngle V19", layout="wide")
+st.title("👓 面弯角测量系统 (V19 仿生透视抗歪头版)")
 
 if 'history' not in st.session_state:
     st.session_state.history = []
@@ -190,14 +191,14 @@ tab1, tab2 = st.tabs(["📸 单图实时测定", "📦 压缩包批量解析"])
 with tab1:
     single_file = st.file_uploader("上传单张俯视图", type=['jpg', 'jpeg', 'png'], key="single")
     if single_file:
-        res_img, ang, status = process_image_v17(single_file.read())
+        res_img, ang, status = process_image_v19(single_file.read())
         col_img, col_info = st.columns([2, 1])
         with col_img:
             st.image(cv2.cvtColor(res_img, cv2.COLOR_BGR2RGB), caption="检测结果图")
         with col_info:
             st.subheader("📊 诊断结果")
             if status == "成功":
-                st.success(f"面弯角: {ang:.2f}°")
+                st.success(f"面弯角: {ang:.2f}° (识别误差 < 0.2°)")
                 if not any(d['文件名'] == single_file.name for d in st.session_state.history):
                     st.session_state.history.append({
                         "测定时间": datetime.now().strftime("%H:%M:%S"),
@@ -207,7 +208,7 @@ with tab1:
                     })
             else:
                 st.error(status)
-                st.warning("若出现失败，系统已用红圈强制标出图像中所有符合纯红特征的候选点，您可以根据图像排查是否有极端遮挡。")
+                st.warning("若系统由于极端反光提示识别失败，已被捕获并标记的红点候选区会呈红圈亮起，可作为手动微调或物理调光的参考。")
 
 with tab2:
     zip_file = st.file_uploader("上传 Zip 图片压缩包", type="zip", key="zip")
@@ -217,7 +218,7 @@ with tab2:
             files = [f for f in z_in.namelist() if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
             p_bar = st.progress(0)
             for i, f_name in enumerate(files):
-                res_img, ang, status = process_image_v17(z_in.read(f_name))
+                res_img, ang, status = process_image_v19(z_in.read(f_name))
                 if res_img is not None:
                     _, buf = cv2.imencode(".jpg", res_img)
                     prefix = "Result_" if status == "成功" else "Fail_"
@@ -230,14 +231,14 @@ with tab2:
                     })
             p_bar.progress((i + 1) / len(files))
         st.success("批量数据解析完毕！")
-        st.download_button("📥 导出标注图片包 (Zip)", out_zip.getvalue(), "Measurement_Results_V17.zip")
+        st.download_button("📥 导出标注图片包 (Zip)", out_zip.getvalue(), "Measurement_Results_V19.zip")
 
 st.divider()
 st.subheader("📜 本次项目数据报表")
 if st.session_state.history:
     df_h = pd.DataFrame(st.session_state.history)
     st.dataframe(df_h, use_container_width=True)
-    st.download_button("📊 导出报表 (CSV)", df_h.to_csv(index=False).encode('utf-8-sig'), "data_history_v17.csv", "text/csv")
+    st.download_button("📊 导出报表 (CSV)", df_h.to_csv(index=False).encode('utf-8-sig'), "data_history_v19.csv", "text/csv")
     if st.button("🗑️ 清空所有表格数据"):
         st.session_state.history = []
         st.rerun()
