@@ -7,8 +7,8 @@ import os
 import pandas as pd
 from datetime import datetime
 
-# --- 核心算法层：V28_Optimized 双翼几何刚性对称死锁器（针对遮挡与配重块干扰调校版） ---
-def process_image_v28_optimized(image_bytes):
+# --- 核心算法层：V29 HSV色域 + 动态区域锁死（彻底解决飞点、错选假点问题） ---
+def process_image_v29(image_bytes):
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if img is None: 
@@ -23,63 +23,71 @@ def process_image_v28_optimized(image_bytes):
     dyn_font_thick = max(1, int(w / 800))  
     font = cv2.FONT_HERSHEY_DUPLEX
 
-    b, g, r = cv2.split(img)
-    r_16 = r.astype(np.int16)
-    g_16 = g.astype(np.int16)
-    b_16 = b.astype(np.int16)
+    # ==========================================
+    # 核心升级 1：划定核心 ROI 区域（过滤手部、左侧衣物及边缘杂色）
+    # 眼镜必然出现在画面中右侧的核心区域
+    # ==========================================
+    roi_mask = np.zeros((h, w), dtype=np.uint8)
+    # 限制横向在 35% 到 95% 之间，纵向在 10% 到 90% 之间
+    cv2.rectangle(roi_mask, (int(w * 0.35), int(h * 0.10)), (int(w * 0.95), int(h * 0.90)), 255, -1)
 
-    rg_diff = r_16 - g_16
-    rb_diff = r_16 - b_16
+    # 转换至 HSV 颜色空间进行精准色彩提取
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    
+    # 红色的色调（Hue）分布在两端，定义两档标准红阈值
+    # 降低饱和度(V)和亮度(V)下限，确保暗光下被遮挡的红点能被抓到
+    lower_red1 = np.array([0, 45, 45])
+    upper_red1 = np.array([10, 255, 255])
+    lower_red2 = np.array([165, 45, 45])
+    upper_red2 = np.array([180, 255, 255])
+    
+    mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
+    mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
+    red_color_mask = cv2.bitwise_or(mask1, mask2)
+    
+    # 将颜色掩膜与区域掩膜进行“与”操作，双重锁死
+    red_mask = cv2.bitwise_and(red_color_mask, roi_mask)
 
     # ==========================================
-    # 步骤 1：多级自适应级联阈值底座（大幅放宽遮挡点的面积与圆度限制）
+    # 步骤 1：多级级联形态学修复
     # ==========================================
     cascade_thresholds = [
-        # 第一档：针对暗光、被配重块遮挡、被碎发切碎的红点极致容错层
-        {"rg": 45, "rb": 30, "r": 100, "circ": 0.35, "min_area": 3}, 
-        # 第二档：标准清晰红点提取层
-        {"rg": 55, "rb": 35, "r": 110, "circ": 0.50, "min_area": 10}   
+        {"close_k": 5, "dilate_k": 3, "circ": 0.30, "min_area": 3},  # 极度容错级
+        {"close_k": 5, "dilate_k": 0, "circ": 0.45, "min_area": 8}   # 标准级
     ]
     
     best_set = None
     min_geometric_error = float('inf')
 
     for pass_idx, th in enumerate(cascade_thresholds):
-        mask = (rg_diff > th["rg"]) & (rb_diff > th["rb"]) & (r_16 > th["r"])
-        red_mask = mask.astype(np.uint8) * 255
-        
-        # 形态学核心调校：先闭运算消除内部碎发缝隙，再通过轻微膨胀把被切碎的红点黏合回来
-        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        
+        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (th["close_k"], th["close_k"]))
         red_cleaned = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel_close)
-        red_cleaned = cv2.dilate(red_cleaned, kernel_dilate, iterations=1) 
         
+        if th["dilate_k"] > 0:
+            kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (th["dilate_k"], th["dilate_k"]))
+            red_cleaned = cv2.dilate(red_cleaned, kernel_dilate, iterations=1)
+            
         contours_red, _ = cv2.findContours(red_cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         candidates = []
         
         for cnt in contours_red:
             area = cv2.contourArea(cnt)
-            # 放低物理面积下限至 th["min_area"]，确保哪怕只露出一丁点红色的中间点也能被捕获
-            if th["min_area"] < area < 1500:
+            if th["min_area"] < area < 2000:
                 perimeter = cv2.arcLength(cnt, True)
                 if perimeter == 0: continue
                 circularity = 4 * np.pi * (area / (perimeter * perimeter))
                 
-                # 降低形状圆度要求（被遮挡的红点轮廓不规则）
                 if circularity >= th["circ"]:
                     M = cv2.moments(cnt)
                     if M["m00"] != 0:
                         cX = int(M["m10"] / M["m00"])
                         cY = int(M["m01"] / M["m00"])
-                        # 边距容错放宽
-                        if 0.01 * w < cX < 0.99 * w and 0.01 * h < cY < 0.99 * h:
-                            candidates.append((cX, cY))
+                        candidates.append((cX, cY))
                             
         num_pts = len(candidates)
         
         # ==========================================
-        # 步骤 2：双翼刚性对称拓扑解算器（保持你的核心逻辑不变）
+        # 步骤 2：双翼刚性对称拓扑解算
         # ==========================================
         if num_pts >= 3:
             for i in range(len(candidates)-2):
@@ -96,11 +104,10 @@ def process_image_v28_optimized(image_bytes):
                         max_idx = np.argmax(dists)
                         max_dist = dists[max_idx]
                         
-                        # 约束 1：两翼刚性跨度限制
-                        if max_dist < min(w, h) * 0.25: 
+                        # 硬约束 1：眼镜两翼物理刚性总跨度限制范围（防止缩得太小或拉得太大）
+                        if max_dist < min(w, h) * 0.25 or max_dist > min(w, h) * 0.75: 
                             continue 
                             
-                        # 确定长边对角的点为【鼻梁中点 p_mid】
                         if max_idx == 0:   
                             p_mid, p1, p2 = pts_temp[2], pts_temp[0], pts_temp[1]
                         elif max_idx == 1: 
@@ -108,23 +115,22 @@ def process_image_v28_optimized(image_bytes):
                         else:              
                             p_mid, p1, p2 = pts_temp[1], pts_temp[0], pts_temp[2]
                         
-                        # 计算双翼方向向量
                         v1 = np.array([p1[0] - p_mid[0], p1[1] - p_mid[1]])
                         v2 = np.array([p2[0] - p_mid[0], p2[1] - p_mid[1]])
                         
                         cos_theta = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
                         temp_angle = np.degrees(np.arccos(np.clip(cos_theta, -1.0, 1.0)))
                         
-                        # 约束 2：面弯角钝角区间
+                        # 硬约束 2：眼镜面弯角物理限值
                         if temp_angle < 95 or temp_angle > 179.5:
                             continue
                             
-                        # 约束 3：双翼非对称性误差允许度（由于遮挡质心可能有轻微偏移，将阈值由0.25放宽至0.30）
+                        # 硬约束 3：两翼刚体物理对称指标
                         len1 = np.linalg.norm(v1)
                         len2 = np.linalg.norm(v2)
                         balance_err = abs(len1 - len2) / max(len1, len2, 1)
                         
-                        if balance_err > 0.30:
+                        if balance_err > 0.25:  # 恢复严格指标，因为ROI和HSV已经滤掉了外部噪音
                             continue 
                         
                         if balance_err < min_geometric_error:
@@ -135,10 +141,13 @@ def process_image_v28_optimized(image_bytes):
                 break 
 
     # ==========================================
-    # 步骤 3：精密解算与渲染层
+    # 步骤 3：精密解算与渲染
     # ==========================================
+    # 绘制ROI区域方便在界面上肉眼debug查看限制范围
+    cv2.rectangle(img, (int(w * 0.35), int(h * 0.10)), (int(w * 0.95), int(h * 0.90)), (0, 255, 0), max(1, dyn_line//2), cv2.LINE_AA)
+
     if best_set is None:
-        return img, 0, f"识别失败：未凑齐刚性对称三点组。检测到候选点数：{len(candidates)}。请检查中间红点是否被完全压死。"
+        return img, 0, f"识别失败：已强制死锁过滤背景与手部。当前核心ROI内找到的红色像素候选点数：{len(candidates)}。请确保留存的三个红点未被完全遮挡。"
         
     p1, p_mid, p2 = best_set 
     
@@ -146,7 +155,7 @@ def process_image_v28_optimized(image_bytes):
     cos_theta = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
     angle = np.degrees(np.arccos(np.clip(cos_theta, -1.0, 1.0)))
     
-    # 渲染结果
+    # 渲染标定线
     cv2.line(img, p1, p_mid, (255, 120, 0), dyn_line, cv2.LINE_AA)
     cv2.line(img, p_mid, p2, (255, 120, 0), dyn_line, cv2.LINE_AA)
     for p in [p1, p_mid, p2]:
@@ -161,8 +170,8 @@ def process_image_v28_optimized(image_bytes):
     return img, angle, "成功"
 
 # --- Streamlit UI 交互层 ---
-st.set_page_config(page_title="WrapAngle V28 Optimized", layout="wide")
-st.title("👓 面弯角精密测量系统 (V28 遮挡容错调校版)")
+st.set_page_config(page_title="WrapAngle V29", layout="wide")
+st.title("👓 面弯角精密测量系统 (V29 HSV空间+核心安全区锁死版)")
 
 if 'history' not in st.session_state:
     st.session_state.history = []
@@ -172,10 +181,10 @@ tab1, tab2 = st.tabs(["📸 单图实时测定", "📦 压缩包批量解析"])
 with tab1:
     single_file = st.file_uploader("上传单张俯视图", type=['jpg', 'jpeg', 'png'], key="single")
     if single_file:
-        res_img, ang, status = process_image_v28_optimized(single_file.read())
+        res_img, ang, status = process_image_v29(single_file.read())
         col_img, col_info = st.columns([2, 1])
         with col_img:
-            st.image(cv2.cvtColor(res_img, cv2.COLOR_BGR2RGB), caption="检测结果图")
+            st.image(cv2.cvtColor(res_img, cv2.COLOR_BGR2RGB), caption="检测结果图（绿色框内为安全算法锁定的检测区域）")
         with col_info:
             st.subheader("📊 诊断结果")
             if status == "成功":
@@ -189,7 +198,7 @@ with tab1:
                     })
             else:
                 st.error(status)
-                st.warning("系统提示：若依然失败，说明中间红点暴露的像素过少，请尝试用后续实验建议调整贴纸位置。")
+                st.warning("安全机制已拦截假点。若提示失败，请确保中间红点未被配重块完全盖死，且受试者碎发没有斩断红点。")
 
 with tab2:
     zip_file = st.file_uploader("上传 Zip 图片压缩包", type="zip", key="zip")
@@ -199,7 +208,7 @@ with tab2:
             files = [f for f in z_in.namelist() if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
             p_bar = st.progress(0)
             for i, f_name in enumerate(files):
-                res_img, ang, status = process_image_v28_optimized(z_in.read(f_name))
+                res_img, ang, status = process_image_v29(z_in.read(f_name))
                 if res_img is not None:
                     _, buf = cv2.imencode(".jpg", res_img)
                     prefix = "Result_" if status == "成功" else "Fail_"
@@ -212,14 +221,14 @@ with tab2:
                     })
             p_bar.progress((i + 1) / len(files))
         st.success("批量数据解析完毕！")
-        st.download_button("📥 导出标注图片包 (Zip)", out_zip.getvalue(), "Measurement_Results_V28_Opt.zip")
+        st.download_button("📥 导出标注图片包 (Zip)", out_zip.getvalue(), "Measurement_Results_V29.zip")
 
 st.divider()
 st.subheader("📜 本次项目数据报表")
 if st.session_state.history:
     df_h = pd.DataFrame(st.session_state.history)
     st.dataframe(df_h, use_container_width=True)
-    st.download_button("📊 导出报表 (CSV)", df_h.to_csv(index=False).encode('utf-8-sig'), "data_history_v28_opt.csv", "text/csv")
+    st.download_button("📊 导出报表 (CSV)", df_h.to_csv(index=False).encode('utf-8-sig'), "data_history_v29.csv", "text/csv")
     if st.button("🗑️ 清空所有表格数据"):
         st.session_state.history = []
         st.rerun()
