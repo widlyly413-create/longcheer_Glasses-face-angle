@@ -137,7 +137,7 @@ def process_image_v25(image_bytes):
             cv2.circle(img, p, dyn_radius + 2, (255, 255, 255), 2, cv2.LINE_AA) 
         return img, 0, f"识别失败：未能在多维刚体空间中匹配出符合可穿戴规范的3点拓扑（当前初筛候选点: {num_pts}个）"
         
-    p1, p mid, p2 = best_set # 解耦成功：p_mid 必定是鼻梁顶点
+    p1, p_mid, p2 = best_set # 解耦成功：p_mid 必定是鼻梁顶点
     
     # 向量夹角公式解算最终面弯角
     v1, v2 = np.array([p1[0]-p_mid[0], p1[1]-p_mid[1]]), np.array([p2[0]-p_mid[0], p2[1]-p_mid[1]])
