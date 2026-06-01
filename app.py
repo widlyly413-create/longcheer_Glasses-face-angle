@@ -7,8 +7,8 @@ import os
 import pandas as pd
 from datetime import datetime
 
-# --- 核心算法层：V28 双翼几何刚性对称死锁器（彻底解决飞点、错选假点问题） ---
-def process_image_v28(image_bytes):
+# --- 核心算法层：V28_Optimized 双翼几何刚性对称死锁器（针对遮挡与配重块干扰调校版） ---
+def process_image_v28_optimized(image_bytes):
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if img is None: 
@@ -32,11 +32,13 @@ def process_image_v28(image_bytes):
     rb_diff = r_16 - b_16
 
     # ==========================================
-    # 步骤 1：多级自适应级联阈值底座（优化调校）
+    # 步骤 1：多级自适应级联阈值底座（大幅放宽遮挡点的面积与圆度限制）
     # ==========================================
     cascade_thresholds = [
-        {"rg": 72, "rb": 45, "r": 120, "circ": 0.55}, # 第一档：高纯度高光拆分层
-        {"rg": 52, "rb": 35, "r": 95, "circ": 0.58}   # 第二档：暗光偏色容错层
+        # 第一档：针对暗光、被配重块遮挡、被碎发切碎的红点极致容错层
+        {"rg": 45, "rb": 30, "r": 100, "circ": 0.35, "min_area": 3}, 
+        # 第二档：标准清晰红点提取层
+        {"rg": 55, "rb": 35, "r": 110, "circ": 0.50, "min_area": 10}   
     ]
     
     best_set = None
@@ -46,33 +48,38 @@ def process_image_v28(image_bytes):
         mask = (rg_diff > th["rg"]) & (rb_diff > th["rb"]) & (r_16 > th["r"])
         red_mask = mask.astype(np.uint8) * 255
         
+        # 形态学核心调校：先闭运算消除内部碎发缝隙，再通过轻微膨胀把被切碎的红点黏合回来
         kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        
         red_cleaned = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel_close)
+        red_cleaned = cv2.dilate(red_cleaned, kernel_dilate, iterations=1) 
         
         contours_red, _ = cv2.findContours(red_cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         candidates = []
         
         for cnt in contours_red:
             area = cv2.contourArea(cnt)
-            # 严格限制标定点物理面积，拦截大面积的衣服折痕和皮肤光斑
-            if 10 < area < 1200:
+            # 放低物理面积下限至 th["min_area"]，确保哪怕只露出一丁点红色的中间点也能被捕获
+            if th["min_area"] < area < 1500:
                 perimeter = cv2.arcLength(cnt, True)
                 if perimeter == 0: continue
                 circularity = 4 * np.pi * (area / (perimeter * perimeter))
                 
-                # 形状精细过滤
+                # 降低形状圆度要求（被遮挡的红点轮廓不规则）
                 if circularity >= th["circ"]:
                     M = cv2.moments(cnt)
                     if M["m00"] != 0:
                         cX = int(M["m10"] / M["m00"])
                         cY = int(M["m01"] / M["m00"])
-                        if 0.02 * w < cX < 0.98 * w and 0.02 * h < cY < 0.98 * h:
+                        # 边距容错放宽
+                        if 0.01 * w < cX < 0.99 * w and 0.01 * h < cY < 0.99 * h:
                             candidates.append((cX, cY))
                             
         num_pts = len(candidates)
         
         # ==========================================
-        # 步骤 2：升级：双翼刚性对称拓扑解算器
+        # 步骤 2：双翼刚性对称拓扑解算器（保持你的核心逻辑不变）
         # ==========================================
         if num_pts >= 3:
             for i in range(len(candidates)-2):
@@ -89,11 +96,11 @@ def process_image_v28(image_bytes):
                         max_idx = np.argmax(dists)
                         max_dist = dists[max_idx]
                         
-                        # 硬约束 1：眼镜左右两翼刚性总跨度硬性限制
+                        # 约束 1：两翼刚性跨度限制
                         if max_dist < min(w, h) * 0.25: 
                             continue 
                             
-                        # 刚体构型解耦：确定长边对角的点为【鼻梁中点 p_mid】
+                        # 确定长边对角的点为【鼻梁中点 p_mid】
                         if max_idx == 0:   
                             p_mid, p1, p2 = pts_temp[2], pts_temp[0], pts_temp[1]
                         elif max_idx == 1: 
@@ -108,42 +115,38 @@ def process_image_v28(image_bytes):
                         cos_theta = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
                         temp_angle = np.degrees(np.arccos(np.clip(cos_theta, -1.0, 1.0)))
                         
-                        # 硬约束 2：面弯角物理范围必须处于 95° 到 179.5° 的钝角区间
+                        # 约束 2：面弯角钝角区间
                         if temp_angle < 95 or temp_angle > 179.5:
                             continue
                             
-                        # 【核心死锁硬约束 3】：双翼非对称性一票否决制
-                        # 上镜腿到鼻梁的距离 len1，与下镜腿到鼻梁的距离 len2，在物理刚体上必须高度对称。
-                        # 如果引入了白大褂、背景上的噪点，双翼比例误差会极大。此处卡死相对误差必须小于 25%！
+                        # 约束 3：双翼非对称性误差允许度（由于遮挡质心可能有轻微偏移，将阈值由0.25放宽至0.30）
                         len1 = np.linalg.norm(v1)
                         len2 = np.linalg.norm(v2)
                         balance_err = abs(len1 - len2) / max(len1, len2, 1)
                         
-                        if balance_err > 0.25:
-                            continue # 假点组合当场抹杀，绝对不允许其进行后续妥协计算
+                        if balance_err > 0.30:
+                            continue 
                         
-                        # 在所有通过刚性死锁的合规眼镜组合中，寻找最对称的最优解
                         if balance_err < min_geometric_error:
                             min_geometric_error = balance_err
                             best_set = (p1, p_mid, p2)
             
             if best_set is not None:
-                break # 成功解算出完全合规的眼镜结构，直接退出级联
+                break 
 
     # ==========================================
     # 步骤 3：精密解算与渲染层
     # ==========================================
     if best_set is None:
-        return img, 0, "识别失败：背景或噪点干扰已被强制过滤，未凑齐眼镜框刚性对称三点组（请确保三个红点未被完全遮挡）"
+        return img, 0, f"识别失败：未凑齐刚性对称三点组。检测到候选点数：{len(candidates)}。请检查中间红点是否被完全压死。"
         
     p1, p_mid, p2 = best_set 
     
-    # 纯数学向量夹角公式解算最终角度
     v1, v2 = np.array([p1[0]-p_mid[0], p1[1]-p_mid[1]]), np.array([p2[0]-p_mid[0], p2[1]-p_mid[1]])
     cos_theta = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
     angle = np.degrees(np.arccos(np.clip(cos_theta, -1.0, 1.0)))
     
-    # 可视化渲染
+    # 渲染结果
     cv2.line(img, p1, p_mid, (255, 120, 0), dyn_line, cv2.LINE_AA)
     cv2.line(img, p_mid, p2, (255, 120, 0), dyn_line, cv2.LINE_AA)
     for p in [p1, p_mid, p2]:
@@ -158,8 +161,8 @@ def process_image_v28(image_bytes):
     return img, angle, "成功"
 
 # --- Streamlit UI 交互层 ---
-st.set_page_config(page_title="WrapAngle V28", layout="wide")
-st.title("👓 面弯角精密测量系统 (V28 刚体双翼死锁版)")
+st.set_page_config(page_title="WrapAngle V28 Optimized", layout="wide")
+st.title("👓 面弯角精密测量系统 (V28 遮挡容错调校版)")
 
 if 'history' not in st.session_state:
     st.session_state.history = []
@@ -169,14 +172,14 @@ tab1, tab2 = st.tabs(["📸 单图实时测定", "📦 压缩包批量解析"])
 with tab1:
     single_file = st.file_uploader("上传单张俯视图", type=['jpg', 'jpeg', 'png'], key="single")
     if single_file:
-        res_img, ang, status = process_image_v28(single_file.read())
+        res_img, ang, status = process_image_v28_optimized(single_file.read())
         col_img, col_info = st.columns([2, 1])
         with col_img:
             st.image(cv2.cvtColor(res_img, cv2.COLOR_BGR2RGB), caption="检测结果图")
         with col_info:
             st.subheader("📊 诊断结果")
             if status == "成功":
-                st.success(f"面弯角解算成功: {ang:.2f}° (识别误差 < 0.2°)")
+                st.success(f"面弯角解算成功: {ang:.2f}°")
                 if not any(d['文件名'] == single_file.name for d in st.session_state.history):
                     st.session_state.history.append({
                         "测定时间": datetime.now().strftime("%H:%M:%S"),
@@ -186,7 +189,7 @@ with tab1:
                     })
             else:
                 st.error(status)
-                st.warning("系统已自动切断并拒绝了所有非对称的背景噪点。若提示失败，请微调拍照光照或受试者碎发。")
+                st.warning("系统提示：若依然失败，说明中间红点暴露的像素过少，请尝试用后续实验建议调整贴纸位置。")
 
 with tab2:
     zip_file = st.file_uploader("上传 Zip 图片压缩包", type="zip", key="zip")
@@ -196,7 +199,7 @@ with tab2:
             files = [f for f in z_in.namelist() if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
             p_bar = st.progress(0)
             for i, f_name in enumerate(files):
-                res_img, ang, status = process_image_v28(z_in.read(f_name))
+                res_img, ang, status = process_image_v28_optimized(z_in.read(f_name))
                 if res_img is not None:
                     _, buf = cv2.imencode(".jpg", res_img)
                     prefix = "Result_" if status == "成功" else "Fail_"
@@ -209,14 +212,14 @@ with tab2:
                     })
             p_bar.progress((i + 1) / len(files))
         st.success("批量数据解析完毕！")
-        st.download_button("📥 导出标注图片包 (Zip)", out_zip.getvalue(), "Measurement_Results_V28.zip")
+        st.download_button("📥 导出标注图片包 (Zip)", out_zip.getvalue(), "Measurement_Results_V28_Opt.zip")
 
 st.divider()
 st.subheader("📜 本次项目数据报表")
 if st.session_state.history:
     df_h = pd.DataFrame(st.session_state.history)
     st.dataframe(df_h, use_container_width=True)
-    st.download_button("📊 导出报表 (CSV)", df_h.to_csv(index=False).encode('utf-8-sig'), "data_history_v28.csv", "text/csv")
+    st.download_button("📊 导出报表 (CSV)", df_h.to_csv(index=False).encode('utf-8-sig'), "data_history_v28_opt.csv", "text/csv")
     if st.button("🗑️ 清空所有表格数据"):
         st.session_state.history = []
         st.rerun()
