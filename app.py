@@ -7,7 +7,7 @@ import os
 import pandas as pd
 from datetime import datetime
 
-# --- 核心算法层：V30 空间拓扑黑框锁死器（专治皮肤红点、痘印干扰） ---
+# --- 核心算法层：V30 空间拓扑黑框锁死器 ---
 def process_image_v30(image_bytes):
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
