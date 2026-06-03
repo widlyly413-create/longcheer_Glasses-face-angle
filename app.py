@@ -293,19 +293,16 @@ def process_image_v28(image_bytes):
 
 # --- 级联识别主函数：V27优先，失败则V28 ---
 def process_image_cascade(image_bytes):
-    # 先用 V27 进行识别
     res_img_v27, angle_v27, status_v27, _ = process_image_v27(image_bytes)
     
     if status_v27 == "成功":
         return res_img_v27, angle_v27, status_v27, "V27"
     
-    # V27 失败，使用 V28 进行增强识别
     res_img_v28, angle_v28, status_v28, _ = process_image_v28(image_bytes)
     
     if status_v28 == "成功":
         return res_img_v28, angle_v28, status_v28, "V28"
     
-    # 两个都失败，返回 V27 的结果和失败原因
     return res_img_v27, 0, f"识别失败：V27和V28算法均未能匹配到合规眼镜刚体。可能原因：\n- 红点被严重遮挡或完全覆盖\n- 光照条件不佳导致红点特征不明显\n- 图像质量过低（严重虚化、模糊）\n- 未检测到足够的红色候选点", "失败"
 
 # --- Streamlit UI 交互层 ---
