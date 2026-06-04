@@ -587,7 +587,7 @@ if st.session_state.batch_images:
                         const clickX = Math.round(e.clientX - rect.left);
                         const clickY = Math.round(e.clientY - rect.top);
                         
-                        coordDisplay.textContent = `点击坐标: (${clickX}, ${clickY})`;
+                        coordDisplay.textContent = "点击坐标: (" + clickX + ", " + clickY + ")";
                         
                         // 检查是否与最后一个点太近
                         if (points.length > 0) {{
