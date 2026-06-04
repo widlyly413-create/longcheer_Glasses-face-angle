@@ -441,22 +441,8 @@ if st.session_state.batch_images:
             st.markdown(f"**当前调节目标**: `{target_file}`")
             pt_len = len(st.session_state.click_pts_accumulator)
             
-            st.info(f"📍 请在右图上【直接单击鼠标左键】：\n1. 左侧红点 ({'🟢 已捕获' if pt_len>=1 else '⚪ 待点击'})\n2. 鼻梁中点 ({'🔴 已捕获' if pt_len>=2 else '⚪ 待点击'})\n3. 右侧红点 ({'🔵 已捕获' if pt_len>=3 else '⚪ 待点击'})")
-            st.caption("💡 提示：鼠标会显示为十字准星，点击即可标记")
-            
-            # 备选方案：手动输入坐标
-            st.markdown("---")
-            st.subheader("🔧 备选：手动输入坐标")
-            h, w = display_img.shape[:2]
-            input_x = st.slider(f"X坐标 (0-{w-1})", 0, w-1, w//2, key=f"x_{target_file}")
-            input_y = st.slider(f"Y坐标 (0-{h-1})", 0, h-1, h//2, key=f"y_{target_file}")
-            
-            if st.button(f"📍 添加点 ({input_x}, {input_y})"):
-                new_pt = (input_x, input_y)
-                if len(st.session_state.click_pts_accumulator) < 3:
-                    if not st.session_state.click_pts_accumulator or np.linalg.norm(np.array(st.session_state.click_pts_accumulator[-1]) - np.array(new_pt)) > 6:
-                        st.session_state.click_pts_accumulator.append(new_pt)
-                        st.rerun()
+            st.success(f"🎯 请直接【单击鼠标左键】图片上的目标点：\n1. 左侧红点 ({'🟢 已捕获' if pt_len>=1 else '⚪ 待点击'})\n2. 鼻梁中点 ({'🔴 已捕获' if pt_len>=2 else '⚪ 待点击'})\n3. 右侧红点 ({'🔵 已捕获' if pt_len>=3 else '⚪ 待点击'})")
+            st.caption("💡 鼠标会显示为十字准星，直接点击图片即可标记")
             
             if st.button("🗑️ 清空当前点重新选"):
                 st.session_state.click_pts_accumulator = []
@@ -498,83 +484,77 @@ if st.session_state.batch_images:
                 if len(st.session_state.click_pts_accumulator) == 3:
                     cv2.line(canvas, st.session_state.click_pts_accumulator[1], st.session_state.click_pts_accumulator[2], (0, 165, 255), 2, cv2.LINE_AA)
 
-            # 💡 【原生 HTML5 Canvas - 真正的单点点击】
-            # 使用 base64 编码图片，通过原生 JavaScript 实现真正的单击事件
+            # 💡 【st.dataframe 坐标容器 + 图像背景点击方案】
+            # 使用 st.dataframe 作为点击容器，配合 CSS 背景图实现纯鼠标点击
             import base64
-            _, buffer = cv2.imencode('.jpg', canvas)
+            _, buffer = cv2.imencode('.png', cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
             img_b64 = base64.b64encode(buffer).decode('utf-8')
             h, w = canvas.shape[:2]
             
-            # 生成唯一的画布ID，防止不同图片之间的冲突
-            canvas_id = f"paint_canvas_{target_file.replace('.', '_')}"
+            # 创建一个数据框作为点击容器（使用最小尺寸）
+            import pandas as pd
+            df = pd.DataFrame({'点击图片选择点': ['点击左侧红点', '点击鼻梁中点', '点击右侧红点'][:len(st.session_state.click_pts_accumulator)+1]})
             
+            # 使用 markdown 添加样式化的点击区域
             html_code = f"""
             <style>
-                #{canvas_id} {{
-                    display: block;
+                .image-click-wrapper {{
+                    position: relative;
+                    width: 100%;
+                    border: 2px solid #4CAF50;
+                    border-radius: 8px;
+                    overflow: hidden;
                     cursor: crosshair;
-                    max-width: 100%;
+                }}
+                .image-click-wrapper img {{
+                    display: block;
+                    width: 100%;
                     height: auto;
-                    border: 2px solid #ddd;
+                }}
+                .click-hint {{
+                    position: absolute;
+                    bottom: 8px;
+                    left: 8px;
+                    background: rgba(0,0,0,0.7);
+                    color: white;
+                    padding: 4px 12px;
                     border-radius: 4px;
+                    font-size: 12px;
+                    pointer-events: none;
                 }}
             </style>
-            <canvas id="{canvas_id}" width="{w}" height="{h}"></canvas>
+            <div class="image-click-wrapper" onclick="handleClick(event, {w}, {h}, '{target_file}')">
+                <img src="data:image/png;base64,{img_b64}" />
+                <div class="click-hint">点击选择点 ({len(st.session_state.click_pts_accumulator)}/3)</div>
+            </div>
             <script>
-                const canvas = document.getElementById("{canvas_id}");
-                const ctx = canvas.getContext("2d");
-                const img = new Image();
-                img.src = "data:image/jpeg;base64,{img_b64}";
-                img.onload = function() {{
-                    ctx.drawImage(img, 0, 0);
-                }};
-                
-                canvas.addEventListener("click", function(e) {{
-                    const rect = canvas.getBoundingClientRect();
-                    const scaleX = canvas.width / rect.width;
-                    const scaleY = canvas.height / rect.height;
-                    const x = Math.round((e.clientX - rect.left) * scaleX);
-                    const y = Math.round((e.clientY - rect.top) * scaleY);
+                function handleClick(e, imgW, imgH, fileName) {{
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    const x = Math.round(((e.clientX - rect.left) / rect.width) * imgW);
+                    const y = Math.round(((e.clientY - rect.top) / rect.height) * imgH);
                     
-                    // 通过隐藏输入框传递坐标
-                    const input = document.createElement('input');
-                    input.type = 'hidden';
-                    input.name = 'canvas_click';
-                    input.value = JSON.stringify({{x: x, y: y, file: "{target_file}"}});
-                    document.body.appendChild(input);
-                    
-                    // 模拟表单提交触发页面刷新
-                    const event = new Event('submit');
-                    const form = document.createElement('form');
-                    form.appendChild(input);
-                    document.body.appendChild(form);
-                    form.dispatchEvent(event);
-                    form.remove();
-                    
-                    // 也可以通过 URL 参数传递
+                    // 使用 URL 参数传递坐标
                     const params = new URLSearchParams(window.location.search);
-                    params.set('click_x', x);
-                    params.set('click_y', y);
-                    params.set('click_file', "{target_file}");
-                    window.history.replaceState({{}}, '', window.location.pathname + '?' + params.toString());
+                    params.set('cx', x.toString());
+                    params.set('cy', y.toString());
+                    params.set('cf', fileName);
+                    params.set('ts', Date.now().toString());
                     
-                    // 触发页面重新运行
-                    setTimeout(() => {{
-                        window.location.reload();
-                    }}, 50);
-                }});
+                    // 触发页面刷新
+                    window.location.search = params.toString();
+                }}
             <\/script>
             """
             st.markdown(html_code, unsafe_allow_html=True)
             
-            # 从 URL 参数获取点击坐标
+            # 处理 URL 参数传递的点击坐标
             import urllib.parse
-            try:
-                query_params = st.query_params
-                if 'click_x' in query_params and 'click_y' in query_params and 'click_file' in query_params:
-                    click_x = int(query_params['click_x'])
-                    click_y = int(query_params['click_y'])
-                    click_file = urllib.parse.unquote(query_params['click_file'])
+            query_params = st.query_params
+            if 'cx' in query_params and 'cy' in query_params and 'cf' in query_params:
+                try:
+                    click_x = int(query_params['cx'])
+                    click_y = int(query_params['cy'])
+                    click_file = urllib.parse.unquote(query_params['cf'])
                     
                     if click_file == target_file and len(st.session_state.click_pts_accumulator) < 3:
                         new_pt = (click_x, click_y)
@@ -583,8 +563,17 @@ if st.session_state.batch_images:
                             # 清除 URL 参数
                             st.query_params.clear()
                             st.rerun()
-            except Exception as e:
-                pass
+                except Exception as e:
+                    pass
+            
+            # 显示图片尺寸信息
+            st.caption(f"图片尺寸: {w} x {h} 像素")
+            
+            # 显示当前已选点
+            if st.session_state.click_pts_accumulator:
+                st.markdown("**已选点坐标**:")
+                for i, pt in enumerate(st.session_state.click_pts_accumulator):
+                    st.markdown(f"- 点{i+1}: ({pt[0]}, {pt[1]})")
 
     if st.button("🗑️ 清空流水线内所有图片缓存"):
         st.session_state.batch_images = {}
