@@ -6,6 +6,7 @@ import io
 import os
 import pandas as pd
 from datetime import datetime
+import json
 
 MULTIPLE_COLORS = [
     (255, 120, 0), (0, 180, 255), (0, 255, 0), 
@@ -16,6 +17,7 @@ MULTIPLE_COLORS = [
 if 'batch_images' not in st.session_state: st.session_state.batch_images = {} 
 if 'success_results' not in st.session_state: st.session_state.success_results = {} 
 if 'history_log' not in st.session_state: st.session_state.history_log = []
+if 'last_selected_file' not in st.session_state: st.session_state.last_selected_file = ""
 
 def calculate_angle_from_three_points(p1, p_mid, p2):
     v1 = np.array([p1[0] - p_mid[0], p1[1] - p_mid[1]])
@@ -43,15 +45,19 @@ def render_measurement_style(img, p1, p_mid, p2, angle, group_idx=0, mode_label=
     cv2.putText(img, text, text_pos, font, dyn_font_scale * 0.75, (0,0,0), dyn_font_thick + 1, cv2.LINE_AA)
     cv2.putText(img, text, text_pos, font, dyn_font_scale * 0.75, color, dyn_font_thick, cv2.LINE_AA)
     
-    cv2.putText(img, f"V39 {mode_label} AVG: {angle:.2f} DEG", 
+    cv2.putText(img, f"V40 {mode_label} AVG: {angle:.2f} DEG", 
                 (30, 60), font, dyn_font_scale, (0, 0, 255), dyn_font_thick + 2, cv2.LINE_AA)
     return img
 
 @st.cache_data
 def load_and_resize_image(file_bytes, max_side=750):
+    """
+    轻量化等比缩放：将大分辨率图转为 Base64 传递给 HTML 容器
+    """
+    import base64
     nparr = np.frombuffer(file_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    if img is None: return None, None, 1.0
+    if img is None: return None, "", 1.0
     h, w = img.shape[:2]
     scale = 1.0
     if max(h, w) > max_side:
@@ -59,7 +65,10 @@ def load_and_resize_image(file_bytes, max_side=750):
         img_resized = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
     else:
         img_resized = img.copy()
-    return img, img_resized, scale
+        
+    _, buffer = cv2.imencode('.jpg', img_resized)
+    img_b64 = base64.b64encode(buffer).decode('utf-8')
+    return img, img_b64, scale
 
 # --- V27 级联多层检测算法 ---
 def process_image_v27(img):
@@ -342,11 +351,11 @@ def process_image_cascade(img):
     return img, 0, fail_reason, "失败"
 
 # --- UI 视图展现层 ---
-st.set_page_config(page_title="WrapAngle V39 Cloud", layout="wide")
-st.title("👓 面弯角高通量流水线测定系统 (V39 云端多维融合版)")
-st.caption("完美适配任何云端服务器。采用 100% 稳健的'滑块微调骨架投影'系统，彻底解决一切组件网络不兼容、无法点击的黑盒故障。")
+st.set_page_config(page_title="WrapAngle V40 PureHTML", layout="wide")
+st.title("👓 面弯角高通量流水线测定系统 (V40 前端无延迟点击选点版)")
+st.caption("完美避开一切第三方自定义组件。点击直接由浏览器本地响应，连线顺滑，零卡顿。点满 3 点后自动安全上传。")
 
-uploaded_files = st.file_uploader("📥 上传俯视图 / 导入 Zip 压缩包（支持多选混投）", type=['jpg', 'jpeg', 'png', 'zip'], accept_multiple_files=True)
+uploaded_files = st.file_uploader("📥 上传俯视图 / 导入 Zip 压缩包", type=['jpg', 'jpeg', 'png', 'zip'], accept_multiple_files=True)
 
 if uploaded_files:
     new_pool = {}
@@ -365,7 +374,7 @@ if uploaded_files:
         st.session_state.batch_images = new_pool
         st.session_state.success_results = {}
         
-        with st.spinner("🤖 正在启动后台算法流水线，快速分流合格品..."):
+        with st.spinner("🤖 后台智能算法正在快速检测合格品..."):
             for name, b_data in st.session_state.batch_images.items():
                 nparr = np.frombuffer(b_data, np.uint8)
                 raw_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -384,13 +393,12 @@ if st.session_state.batch_images:
     fail_count = total_count - success_count
     
     c1, c2, c3 = st.columns(3)
-    c1.metric("📦 当前流转图片总量", f"{total_count} 张")
-    c2.metric("🤖 后台算法自动识别成功", f"{success_count} 张")
-    c3.metric("✍️ 手动选点补偿通过", f"{success_count} 张")
+    c1.metric("📦 图像总数", f"{total_count} 张")
+    c2.metric("🤖 自动识别通过", f"{success_count} 张")
+    c3.metric("🖱️ 需手动补偿", f"{fail_count} 张")
 
-    # --- 第一步：一键打包混下载区 ---
     st.write("---")
-    st.subheader("📥 核心成果数据包导出")
+    st.subheader("📥 核心数据成果包下载区")
     
     if st.session_state.success_results:
         col_dl1, col_dl2 = st.columns(2)
@@ -400,108 +408,199 @@ if st.session_state.batch_images:
                 for f_name, data_obj in st.session_state.success_results.items():
                     prefix = "Auto_" if data_obj["mode"].startswith("自动识别") else "Manual_"
                     z_out.writestr(f"{prefix}{f_name}", data_obj["bytes"])
-            
-            st.download_button(
-                label="📥 导出已处理的混合标注图片包 (Zip)",
-                data=zip_buffer.getvalue(),
-                file_name=f"WrapAngle_V39_Report_{datetime.now().strftime('%m%d_%H%M')}.zip",
-                mime="application/zip",
-                use_container_width=True
-            )
+            st.download_button("📥 导出混合标注结果图片包 (Zip)", zip_buffer.getvalue(), f"WrapAngle_V40_Result.zip", "application/zip", use_container_width=True)
         with col_dl2:
             all_log = []
             for name in st.session_state.batch_images.keys():
                 if name in st.session_state.success_results:
                     obj = st.session_state.success_results[name]
-                    all_log.append({"文件名": name, "最终测量面弯角": obj["angle"], "测量模式": obj["mode"], "状态": "✅ 成功闭环"})
+                    all_log.append({"文件名": name, "最终面弯角": obj["angle"], "分析模式": obj["mode"], "状态": "✅ 成功闭环"})
                 else:
-                    all_log.append({"文件名": name, "最终测量面弯角": "-", "测量模式": "未通过", "状态": "❌ 待手动介入"})
+                    all_log.append({"文件名": name, "最终测量面弯角": "-", "分析模式": "未通过", "状态": "❌ 待手动介入"})
             df = pd.DataFrame(all_log)
-            st.download_button(
-                label="📊 导出完整面弯角数据分析报表 (CSV)",
-                data=df.to_csv(index=False).encode('utf-8-sig'),
-                file_name="WrapAngle_V39_Report.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
+            st.download_button("📊 导出完整面弯角分析报表 (CSV)", df.to_csv(index=False).encode('utf-8-sig'), "WrapAngle_Report.csv", "text/csv", use_container_width=True)
         st.dataframe(df, use_container_width=True)
 
-    # --- 第二步：滑块自适应绝对坐标微调工作区 ---
+    # --- 💡 【核心重构：纯前端 HTML5 零延迟点击池】 ---
     st.write("---")
-    st.subheader("🖱️ 手动故障异常补偿干预区 (100% 稳健响应模式)")
+    st.subheader("🖱️ 手动微调介入选点区 (100% 毫秒级零延迟)")
     
-    target_file = st.selectbox("🎯 请选择需要【进入手动微调】的目标图片：", list(st.session_state.batch_images.keys()))
+    target_file = st.selectbox("🎯 请选择需要【进入手动选点】的目标图片：", list(st.session_state.batch_images.keys()))
     
     if target_file:
-        is_already_success = target_file in st.session_state.success_results
-        if is_already_success:
-            st.warning(f"💡 提示：图片 `{target_file}` 此前已有结果（角度: {st.session_state.success_results[target_file]['angle']}），执行保存将直接覆盖。")
+        if target_file in st.session_state.success_results:
+            st.warning(f"💡 提示：图片 `{target_file}` 此前已有结果（角度: {st.session_state.success_results[target_file]['angle']}），再次点击保存将直接覆盖。")
         else:
-            st.error(f"🔍 提示：图片 `{target_file}` 自动识别失败，请在右侧控制台拉动滑块，瞄准镜框上的红点。")
+            st.error(f"🔍 提示：图片 `{target_file}` 自动识别失败。请在下方画面上直接顺次点选：1.左侧红点 -> 2.鼻梁中点 -> 3.右侧红点。")
             
         raw_data = st.session_state.batch_images[target_file]
-        orig_img, display_img, scale = load_and_resize_image(raw_data, max_side=800)
-        h_disp, w_disp = display_img.shape[:2]
+        orig_img, img_b64, scale = load_and_resize_image(raw_data, max_side=750)
         
-        col_workspace, col_control = st.columns([13, 8])
-        
-        with col_control:
-            st.markdown(f"**当前修正目标**: `{target_file}`")
-            
-            # 使用带默认预设的精细滑块，初值直接定位在屏幕中线附近，方便快速拖动
-            st.markdown("##### 🟢 1. 左侧标定点坐标调整")
-            p1_x = st.slider("左侧点 X 轴", 0, w_disp, int(w_disp * 0.2), key=f"p1x_{target_file}")
-            p1_y = st.slider("左侧点 Y 轴", 0, h_disp, int(h_disp * 0.5), key=f"p1y_{target_file}")
-            
-            st.markdown("##### 🔴 2. 鼻梁中点坐标调整")
-            pm_x = st.slider("鼻梁点 X 轴", 0, w_disp, int(w_disp * 0.5), key=f"pmx_{target_file}")
-            pm_y = st.slider("鼻梁点 Y 轴", 0, h_disp, int(h_disp * 0.52), key=f"pmy_{target_file}")
-            
-            st.markdown("##### 🔵 3. 右侧标定点坐标调整")
-            p2_x = st.slider("右侧点 X 轴", 0, w_disp, int(w_disp * 0.8), key=f"p2x_{target_file}")
-            p2_y = st.slider("右侧点 Y 轴", 0, h_disp, int(h_disp * 0.5), key=f"p2y_{target_file}")
-            
-            # 实时换算回高分辨率大图坐标，保证角度计算的物理精确度
-            p1_r = (int(p1_x / scale), int(p1_y / scale))
-            pm_r = (int(pm_x / scale), int(pm_y / scale))
-            p2_r = (int(p2_x / scale), int(p2_y / scale))
-            
-            m_angle = calculate_angle_from_three_points(p1_r, pm_r, p2_r)
-            st.metric(label="📐 实时骨架解算面弯角", value=f"{m_angle:.2f}°")
-            
-            if st.button("💾 确认此骨架，强行写入压缩包", key="save_to_pool", use_container_width=True):
-                # 调用完全相同的自动化渲染引擎，输出100%对齐的测量标注图
-                final_render_img = render_measurement_style(orig_img.copy(), p1_r, pm_r, p2_r, m_angle, 0, "MANUAL")
-                _, out_buf = cv2.imencode(".jpg", final_render_img)
-                
-                # 同步记录
-                st.session_state.success_results[target_file] = {
-                    "bytes": out_buf.tobytes(), "angle": f"{m_angle:.2f}°", "mode": "人工选点"
-                }
-                st.toast(f"图片 {target_file} 的人工手动校准已成功保存！", icon="✅")
-                st.rerun()
+        # 💡 HTML5 局部内嵌画布：点击由用户的浏览器直接计算，不走 WebSocket，速度飞起且绝不报错！
+        html_code = f"""
+        <html>
+        <head>
+            <style>
+                body {{ margin: 0; padding: 0; display: flex; flex-direction: column; align-items: center; font-family: sans-serif; background-color: #f8f9fa; }}
+                #canvas-container {{ position: relative; display: inline-block; box-shadow: 0 4px 10px rgba(0,0,0,0.15); border-radius: 4px; overflow: hidden; }}
+                canvas {{ display: block; cursor: crosshair; }}
+                #info-panel {{ margin: 10px 0; font-size: 14px; font-weight: bold; color: #333; text-align: center; background: #e9ecef; padding: 8px 20px; border-radius: 20px; }}
+                button {{ margin-top: 5px; padding: 6px 15px; background: #dc3545; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: bold; }}
+                button:hover {{ background: #bd2130; }}
+            </style>
+        </head>
+        <body>
+            <div id="info-panel">📍 状态提示：请在下方图上点击【第 1 点：左侧标定点】</div>
+            <div id="canvas-container">
+                <canvas id="paintCanvas"></canvas>
+            </div>
+            <div><button id="resetBtn">🔄 清空重选</button></div>
 
-        with col_workspace:
-            # 实时在画布上把滑块控制的这三个点和骨架线条绘制出来，实现毫秒级无延迟预览
-            canvas = display_img.copy()
-            pts = [(p1_x, p1_y), (pm_x, pm_y), (p2_x, p2_y)]
-            
-            # 画线骨架
-            cv2.line(canvas, pts[0], pts[1], (0, 165, 255), 2, cv2.LINE_AA)
-            cv2.line(canvas, pts[1], pts[2], (0, 165, 255), 2, cv2.LINE_AA)
-            
-            # 画十字靶心
-            for idx, pt in enumerate(pts):
-                c_color = (255, 120, 0) if idx==0 else ((0, 255, 0) if idx==1 else (0, 0, 255))
-                cross = 10
-                cv2.line(canvas, (pt[0] - cross, pt[1]), (pt[0] + cross, pt[1]), c_color, 2, cv2.LINE_AA)
-                cv2.line(canvas, (pt[0], pt[1] - cross), (pt[0], pt[1] + cross), c_color, 2, cv2.LINE_AA)
-                cv2.putText(canvas, f"{idx+1}", (pt[0]+12, pt[1]-12), cv2.FONT_HERSHEY_DUPLEX, 0.5, c_color, 1, cv2.LINE_AA)
+            <script>
+                const imgB64 = "data:image/jpeg;base64,{img_b64}";
+                const canvas = document.getElementById("paintCanvas");
+                const ctx = canvas.getContext("2d");
+                const infoPanel = document.getElementById("info-panel");
+                const resetBtn = document.getElementById("resetBtn");
                 
-            # 使用官方底层最稳固的 st.image 渲染。这里的数据流通路是单向的，绝不卡顿
-            st.image(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB), caption="实时微调对照画布（请拉动右侧滑块，将1、2、3号靶心对准红点）", use_container_width=True)
+                let img = new Image();
+                img.src = imgB64;
+                
+                let points = [];
+                const colors = ["#ff7800", "#00b4ff", "#00ff00"];
+                const labels = ["1:左侧点", "2:鼻梁中点", "3:右侧点"];
+                
+                img.onload = function() {{
+                    canvas.width = img.width;
+                    canvas.height = img.height;
+                    drawAll();
+                }};
+                
+                function drawAll() {{
+                    ctx.drawImage(img, 0, 0);
+                    
+                    // 实时本地流畅绘制线条骨架
+                    if (points.length >= 2) {{
+                        ctx.beginPath();
+                        ctx.moveTo(points[0].x, points[0].y);
+                        ctx.lineTo(points[1].x, points[1].y);
+                        if (points.length === 3) {{
+                            ctx.lineTo(points[2].x, points[2].y);
+                        }}
+                        ctx.strokeStyle = "#00a5ff";
+                        ctx.lineWidth = 3;
+                        ctx.stroke();
+                    }}
+                    
+                    // 实时本地流畅绘制靶心
+                    points.forEach((pt, idx) => {{
+                        ctx.beginPath();
+                        ctx.arc(pt.x, pt.y, 6, 0, 2 * Math.PI);
+                        ctx.fillStyle = colors[idx];
+                        ctx.fill();
+                        ctx.strokeStyle = "#000000";
+                        ctx.lineWidth = 1.5;
+                        ctx.stroke();
+                        
+                        ctx.fillStyle = "#ffffff";
+                        ctx.strokeStyle = "#000000";
+                        ctx.lineWidth = 3;
+                        ctx.font = "bold 13px sans-serif";
+                        ctx.strokeText(labels[idx], pt.x + 10, pt.y - 10);
+                        ctx.fillText(labels[idx], pt.x + 10, pt.y - 10);
+                    }});
+                }}
+                
+                // 零卡顿的秘密：事件绑定在纯前端，点完3个点前绝不和Streamlit后台通信
+                canvas.addEventListener("click", function(e) {{
+                    if (points.length >= 3) return;
+                    
+                    const rect = canvas.getBoundingClientRect();
+                    const clickX = Math.round(e.clientX - rect.left);
+                    const clickY = Math.round(e.clientY - rect.top);
+                    
+                    points.push({{ x: clickX, y: clickY }});
+                    drawAll();
+                    
+                    if (points.length === 1) {{
+                        infoPanel.innerHTML = "📍 状态提示：请点击【第 2 点：鼻梁中间点】";
+                    }} else if (points.length === 2) {{
+                        infoPanel.innerHTML = "📍 状态提示：请点击【第 3 点：右侧标定点】";
+                    }} else if (points.length === 3) {{
+                        infoPanel.innerHTML = "🎉 选点已满！正在打包上传并执行原图对齐中...";
+                        infoPanel.style.background = "#d4edda";
+                        infoPanel.style.color = "#155724";
+                        
+                        // 触发 URL 参数更新，通知 Streamlit 后台接收数据
+                        const ptData = encodeURIComponent(JSON.stringify(points));
+                        window.history.pushState({{}}, '', window.location.pathname + '?pt_data=' + ptData + '&target=' + encodeURIComponent("{target_file}"));
+                        
+                        // 通过模拟按键触发页面重新运行
+                        setTimeout(() => {{
+                            const event = new KeyboardEvent('keydown', {{ key: 'r', ctrlKey: true }});
+                            window.dispatchEvent(event);
+                        }}, 100);
+                    }}
+                }});
+                
+                resetBtn.addEventListener("click", function() {{
+                    points = [];
+                    infoPanel.innerHTML = "📍 状态提示：请在下方图上点击【第 1 点：左侧标定点】";
+                    infoPanel.style.background = "#e9ecef";
+                    infoPanel.style.color = "#333";
+                    drawAll();
+                    
+                    // 清除 URL 参数
+                    window.history.pushState({{}}, '', window.location.pathname);
+                    const event = new KeyboardEvent('keydown', {{ key: 'r', ctrlKey: true }});
+                    window.dispatchEvent(event);
+                }});
+            </script>
+        </body>
+        </html>
+        """
+        
+        # 使用 Streamlit 原生 HTML 执行舱进行沙盒隔离注入，完美解决超时与加载报错
+        st.components.v1.html(html_code, height=830, scroller=False)
+        
+        # 💡 【后台数据承接与逆映射对齐】
+        # 通过 Streamlit Query Params 机制获取 HTML5 前端传递回来的坐标数据
+        query_params = st.query_params
+        
+        if "pt_data" in query_params and "target" in query_params:
+            try:
+                pt_data = json.loads(query_params["pt_data"])
+                target_from_params = query_params["target"]
+                
+                if target_from_params == target_file and len(pt_data) == 3:
+                    # 将缩放后的坐标还原回原始图片尺寸
+                    p1_r = (int(pt_data[0]["x"] / scale), int(pt_data[0]["y"] / scale))
+                    pm_r = (int(pt_data[1]["x"] / scale), int(pt_data[1]["y"] / scale))
+                    p2_r = (int(pt_data[2]["x"] / scale), int(pt_data[2]["y"] / scale))
+                    
+                    m_angle = calculate_angle_from_three_points(p1_r, pm_r, p2_r)
+                    
+                    with st.expander("📐 计算结果预览", expanded=True):
+                        st.success(f"成功计算面弯角: **{m_angle:.2f}°**")
+                        st.info(f"原始坐标还原：P1={p1_r}, PM={pm_r}, P2={p2_r}")
+                        
+                        if st.button(f"💾 确认保存 {target_file} 的手动测量结果", use_container_width=True):
+                            final_render_img = render_measurement_style(orig_img.copy(), p1_r, pm_r, p2_r, m_angle, 0, "MANUAL")
+                            _, out_buf = cv2.imencode(".jpg", final_render_img)
+                            
+                            st.session_state.success_results[target_file] = {
+                                "bytes": out_buf.tobytes(), "angle": f"{m_angle:.2f}°", "mode": "人工选点"
+                            }
+                            
+                            # 清除 URL 参数
+                            st.query_params.clear()
+                            st.toast(f"图片 {target_file} 的人工手动校准已成功保存！", icon="✅")
+                            st.rerun()
+            except Exception as e:
+                st.warning(f"数据解析异常: {str(e)}")
 
     if st.button("🗑️ 清空全量图片缓存"):
         st.session_state.batch_images = {}
         st.session_state.success_results = {}
+        st.query_params.clear()
         st.rerun()
