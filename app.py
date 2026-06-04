@@ -6,6 +6,7 @@ import io
 import os
 import pandas as pd
 from datetime import datetime
+import plotly.express as px
 
 MULTIPLE_COLORS = [
     (255, 120, 0), (0, 180, 255), (0, 255, 0), 
@@ -16,6 +17,8 @@ MULTIPLE_COLORS = [
 if 'batch_images' not in st.session_state: st.session_state.batch_images = {} 
 if 'success_results' not in st.session_state: st.session_state.success_results = {} 
 if 'history_log' not in st.session_state: st.session_state.history_log = []
+if 'plotly_pts' not in st.session_state: st.session_state.plotly_pts = [] 
+if 'last_selected_file' not in st.session_state: st.session_state.last_selected_file = ""
 
 def calculate_angle_from_three_points(p1, p_mid, p2):
     v1 = np.array([p1[0] - p_mid[0], p1[1] - p_mid[1]])
@@ -47,62 +50,21 @@ def render_measurement_style(img, p1, p_mid, p2, angle, group_idx=0, mode_label=
                 (30, 60), font, dyn_font_scale, (0, 0, 255), dyn_font_thick + 2, cv2.LINE_AA)
     return img
 
-# --- 💡 核心升级：OpenCV系统级原生鼠标监听捕获器（免网络流阻断）---
-def opencv_native_manual_picker(img_src, filename_label):
-    """
-    通过弹出一个零延迟的底层本地窗口完成点选，完美避开浏览器自定义组件报错。
-    """
-    h, w = img_src.shape[:2]
-    screen_max_side = 850
+@st.cache_data
+def load_and_resize_image(file_bytes, max_side=750):
+    nparr = np.frombuffer(file_bytes, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if img is None: return None, None, 1.0
+    h, w = img.shape[:2]
     scale = 1.0
-    if max(h, w) > screen_max_side:
-        scale = screen_max_side / max(h, w)
-        img_view = cv2.resize(img_src, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+    if max(h, w) > max_side:
+        scale = max_side / max(h, w)
+        img_resized = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
     else:
-        img_view = img_src.copy()
+        img_resized = img.copy()
+    return img, img_resized, scale
 
-    clicked_points_disp = []
-
-    def mouse_callback(event, x, y, flags, param):
-        if event == cv2.EVENT_LBUTTONDOWN:
-            if len(clicked_points_disp) < 3:
-                clicked_points_disp.append((x, y))
-                c_color = (255, 120, 0) if len(clicked_points_disp)==1 else ((0, 255, 0) if len(clicked_points_disp)==2 else (0, 0, 255))
-                cv2.line(img_view, (x - 8, y), (x + 8, y), c_color, 2, cv2.LINE_AA)
-                cv2.line(img_view, (x, y - 8), (x, y + 8), c_color, 2, cv2.LINE_AA)
-                cv2.putText(img_view, str(len(clicked_points_disp)), (x + 10, y - 10), cv2.FONT_HERSHEY_DUPLEX, 0.5, c_color, 1, cv2.LINE_AA)
-                cv2.imshow(win_name, img_view)
-
-    win_name = f"Manual Correction - {filename_label} (Click 3 points sequentially)"
-    cv2.namedWindow(win_name, cv2.WINDOW_AUTOSIZE)
-    cv2.setMouseCallback(win_name, mouse_callback)
-    
-    cv2.imshow(win_name, img_view)
-    cv2.setWindowProperty(win_name, cv2.WND_PROP_TOPMOST, 1)
-    
-    st.toast("💡 请切换到桌面查看弹出的图片窗口，顺次点击3点后窗口将自动闭环！", icon="🖥️")
-    
-    while True:
-        key = cv2.waitKey(10) & 0xFF
-        if len(clicked_points_disp) == 3 or key == 27 or key == 32:
-            break
-        if cv2.getWindowProperty(win_name, cv2.WND_PROP_VISIBLE) < 1:
-            break
-            
-    cv2.destroyWindow(win_name)
-    
-    if len(clicked_points_disp) < 3:
-        return None, 0
-
-    p1_r = (int(clicked_points_disp[0][0] / scale), int(clicked_points_disp[0][1] / scale))
-    pm_r = (int(clicked_points_disp[1][0] / scale), int(clicked_points_disp[1][1] / scale))
-    p2_r = (int(clicked_points_disp[2][0] / scale), int(clicked_points_disp[2][1] / scale))
-    
-    angle = calculate_angle_from_three_points(p1_r, pm_r, p2_r)
-    final_img = render_measurement_style(img_src.copy(), p1_r, pm_r, p2_r, angle, 0, "MANUAL")
-    return final_img, angle
-
-# --- V27 级联多层检测算法（优化：三点连线尽量水平或竖直）---
+# --- V27 级联多层检测算法 ---
 def process_image_v27(img):
     if img is None:
         return None, 0, "文件读取失败", "V27"
@@ -382,10 +344,10 @@ def process_image_cascade(img):
     
     return img, 0, fail_reason, "失败"
 
-# --- UI 视图展现 ---
+# --- UI 视图展现层 ---
 st.set_page_config(page_title="WrapAngle V36 Professional", layout="wide")
-st.title("👓 面弯角高通量流水线测定系统 (V36 极速交互抗卡顿版)")
-st.caption("专为大规模散图和压缩包定制。自动识别失败的图片将自动进入人工补偿区，使用底层 OpenCV 原生窗口进行零延迟点选。")
+st.title("👓 面弯角高通量流水线测定系统 (V36 Plotly 云端兼容版)")
+st.caption("完美适配云端环境。采用官方推荐的 Plotly 网页轻量矢量画布，彻底消灭组件超时与本地窗口报错。")
 
 uploaded_files = st.file_uploader("📥 上传俯视图 / 导入 Zip 压缩包（支持多选混投）", type=['jpg', 'jpeg', 'png', 'zip'], accept_multiple_files=True)
 
@@ -405,6 +367,7 @@ if uploaded_files:
     if not st.session_state.batch_images or set(new_pool.keys()) != set(st.session_state.batch_images.keys()):
         st.session_state.batch_images = new_pool
         st.session_state.success_results = {}
+        st.session_state.plotly_pts = []
         
         with st.spinner("🤖 正在启动后台算法流水线，快速分流合格品..."):
             for name, b_data in st.session_state.batch_images.items():
@@ -428,7 +391,7 @@ if st.session_state.batch_images:
     c1, c2, c3 = st.columns(3)
     c1.metric("📦 当前流转图片总量", f"{total_count} 张")
     c2.metric("🤖 后台算法自动识别成功", f"{success_count} 张")
-    c3.metric("🖱️ 需人工补偿校准", f"{fail_count} 张")
+    c3.metric("鼠标手动点选补偿通过", f"{success_count} 张")
 
     # --- 第一步：一键打包混下载区 ---
     st.write("---")
@@ -444,7 +407,7 @@ if st.session_state.batch_images:
                     z_out.writestr(f"{prefix}{f_name}", data_obj["bytes"])
             
             st.download_button(
-                label="📥 导出已处理的混合标注图片包 (Zip) - 无需等待页面加载",
+                label="📥 导出已处理的混合标注图片包 (Zip)",
                 data=zip_buffer.getvalue(),
                 file_name=f"WrapAngle_V36_Combined_{datetime.now().strftime('%m%d_%H%M')}.zip",
                 mime="application/zip",
@@ -466,41 +429,98 @@ if st.session_state.batch_images:
                 mime="text/csv",
                 use_container_width=True
             )
-        
         st.dataframe(df, use_container_width=True)
 
-    # --- 第二步：原生 OpenCV 弹窗式手动选点工作区 ---
+    # --- 第二步：Plotly 官方高能轻量级手动选点工作区 ---
     st.write("---")
-    st.subheader("🖱️ 手动异常补偿干预区 (系统窗口极速模式)")
+    st.subheader("🖱️ 手动异常补偿干预区 (云端毫秒级不卡顿模式)")
     
     target_file = st.selectbox("🎯 请选择需要【进入手动微调】的目标图片：", list(st.session_state.batch_images.keys()))
     
     if target_file:
+        if st.session_state.last_selected_file != target_file:
+            st.session_state.plotly_pts = []
+            st.session_state.last_selected_file = target_file
+            
         is_already_success = target_file in st.session_state.success_results
         if is_already_success:
             st.warning(f"💡 提示：图片 `{target_file}` 此前已成功生成结果（角度: {st.session_state.success_results[target_file]['angle']}），重新点选将完美覆盖原纪录。")
         else:
-            st.error(f"🔍 提示：图片 `{target_file}` 自动识别失败，请使用下方独立原生窗口进行纠偏。")
+            st.error(f"🔍 提示：图片 `{target_file}` 自动识别失败，请使用下方官方 Plotly 画布进行极速测定。")
             
-        if st.button(f"🖥️ 唤醒原生独立选点窗口：处理 {target_file}", use_container_width=True):
-            raw_data = st.session_state.batch_images[target_file]
-            nparr = np.frombuffer(raw_data, np.uint8)
-            orig_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        raw_data = st.session_state.batch_images[target_file]
+        orig_img, display_img, scale = load_and_resize_image(raw_data)
+        
+        col_workspace, col_control = st.columns([2, 1])
+        
+        with col_control:
+            st.markdown(f"**当前调节目标**: `{target_file}`")
+            pt_len = len(st.session_state.plotly_pts)
+            st.info(f"📍 请在左图上【左键单击】红点位置：\n1. 左侧点 ({'🟢 已捕获' if pt_len>=1 else '⚪ 待点击'})\n2. 鼻梁中点 ({'🔴 已捕获' if pt_len>=2 else '⚪ 待点击'})\n3. 右侧点 ({'🔵 已捕获' if pt_len>=3 else '⚪ 待点击'})")
             
-            # 直接调用底层内存级鼠标捕获，彻底避免网络加载组件错误
-            final_render_img, m_angle = opencv_native_manual_picker(orig_img, target_file)
-            
-            if final_render_img is not None:
-                _, out_buf = cv2.imencode(".jpg", final_render_img)
-                st.session_state.success_results[target_file] = {
-                    "bytes": out_buf.tobytes(), "angle": f"{m_angle:.2f}°", "mode": "人工选点"
-                }
-                st.success(f"🎉 成功解算并注入！图片 `{target_file}` 的测量角度为：{m_angle:.2f}°")
+            if st.button("🗑️ 清空当前点重新选", key="clear_points"):
+                st.session_state.plotly_pts = []
                 st.rerun()
-            else:
-                st.error("操作被取消或点选点数不足3个，未能成功写入。")
+                
+            if pt_len == 3:
+                p1_d, pm_d, p2_d = st.session_state.plotly_pts
+                p1_r = (int(p1_d[0] / scale), int(p1_d[1] / scale))
+                pm_r = (int(pm_d[0] / scale), int(pm_d[1] / scale))
+                p2_r = (int(p2_d[0] / scale), int(p2_d[1] / scale))
+                
+                m_angle = calculate_angle_from_three_points(p1_r, pm_r, p2_r)
+                st.success(f"📐 鼠标解算面弯角: **{m_angle:.2f}°**")
+                
+                if st.button("💾 确认并强行写入合规包", key="save_to_pool"):
+                    final_render_img = render_measurement_style(orig_img.copy(), p1_r, pm_r, p2_r, m_angle, 0, "MANUAL")
+                    _, out_buf = cv2.imencode(".jpg", final_render_img)
+                    
+                    st.session_state.success_results[target_file] = {
+                        "bytes": out_buf.tobytes(), "angle": f"{m_angle:.2f}°", "mode": "人工选点"
+                    }
+                    st.session_state.plotly_pts = []
+                    st.toast(f"图片 {target_file} 记录已成功闭环！", icon="🚀")
+                    st.rerun()
 
-    if st.button("🗑️ 清空流水线内所有图片缓存（重新上传新数据前点击）"):
+        with col_workspace:
+            canvas = display_img.copy()
+            for i, pt in enumerate(st.session_state.plotly_pts):
+                c_color = (255, 120, 0) if i==0 else ((0, 255, 0) if i==1 else (0, 0, 255))
+                cv2.circle(canvas, pt, 5, c_color, -1, cv2.LINE_AA)
+                cv2.putText(canvas, str(i+1), (pt[0]+10, pt[1]-10), cv2.FONT_HERSHEY_DUPLEX, 0.5, c_color, 1, cv2.LINE_AA)
+            if len(st.session_state.plotly_pts) == 3:
+                cv2.line(canvas, st.session_state.plotly_pts[0], st.session_state.plotly_pts[1], (0, 165, 255), 2, cv2.LINE_AA)
+                cv2.line(canvas, st.session_state.plotly_pts[1], st.session_state.plotly_pts[2], (0, 165, 255), 2, cv2.LINE_AA)
+                
+            rgb_canvas = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
+            fig = px.imshow(rgb_canvas)
+            fig.update_layout(
+                margin=dict(l=0, r=0, t=0, b=0),
+                xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                hovermode=False
+            )
+            
+            click_data = st.plotly_chart(
+                fig, 
+                use_container_width=True, 
+                config={'displayModeBar': False},
+                on_select="rerun"
+            )
+            
+            if click_data and "selection" in click_data and "points" in click_data["selection"]:
+                pts = click_data["selection"]["points"]
+                if len(pts) > 0 and len(st.session_state.plotly_pts) < 3:
+                    new_x = int(pts[0]["x"])
+                    new_y = int(pts[0]["y"])
+                    new_pt = (new_x, new_y)
+                    
+                    if not st.session_state.plotly_pts or np.linalg.norm(np.array(st.session_state.plotly_pts[-1]) - np.array(new_pt)) > 5:
+                        st.session_state.plotly_pts.append(new_pt)
+                        st.rerun()
+
+    if st.button("🗑️ 清空全量图片缓存"):
         st.session_state.batch_images = {}
         st.session_state.success_results = {}
+        st.session_state.plotly_pts = []
         st.rerun()
