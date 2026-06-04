@@ -63,81 +63,289 @@ def load_and_resize_image(file_bytes, max_side=800):
         img_resized = img.copy()
     return img, img_resized, scale
 
-def pixel_level_reconstruct_mask_v34(img):
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    lower_red1, upper_red1 = np.array([0, 12, 30]), np.array([22, 255, 255])
-    lower_red2, upper_red2 = np.array([150, 12, 30]), np.array([180, 255, 255])
-    mask_hsv = cv2.bitwise_or(cv2.inRange(hsv, lower_red1, upper_red1), cv2.inRange(hsv, lower_red2, upper_red2))
+# --- V27 级联多层检测算法（优化：三点连线尽量水平或竖直）---
+def process_image_v27(img):
+    if img is None:
+        return None, 0, "文件读取失败", "V27"
     
-    flood_mask = mask_hsv.copy()
-    h_f, w_f = flood_mask.shape[:2]
-    fill_contour = np.zeros((h_f + 2, w_f + 2), np.uint8)
-    cv2.floodFill(flood_mask, fill_contour, (0, 0), 255)
-    mask_filled = mask_hsv | cv2.bitwise_not(flood_mask)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    return cv2.morphologyEx(mask_filled, cv2.MORPH_CLOSE, kernel)
-
-def process_image_v34_core(img):
     h, w = img.shape[:2]
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    pixel_mask = pixel_level_reconstruct_mask_v34(img)
-    contours, _ = cv2.findContours(pixel_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    candidates = []
     
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if 4 < area < 3500:
-            M = cv2.moments(cnt)
-            if M["m00"] != 0:
-                cX, cY = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
-                check_offsets = [-12, -8, 8, 12]
-                dark_pixel_count = 0
-                for offset in check_offsets:
-                    if 0 <= cX + offset < w and gray[cY, cX + offset] < 90: dark_pixel_count += 1
-                    if 0 <= cY + offset < h and gray[cY + offset, cX] < 90: dark_pixel_count += 1
-                if dark_pixel_count < 2: continue
-                candidates.append((cX, cY))
-                        
-    candidates = list(set(candidates))[:40] 
-    num_pts = len(candidates)
-    all_valid_combinations = []
-    
-    if num_pts >= 3:
-        for i in range(num_pts - 2):
-            for j in range(i + 1, num_pts - 1):
-                for k in range(j + 1, num_pts):
-                    pts_temp = [candidates[i], candidates[j], candidates[k]]
-                    dists = [np.linalg.norm(np.array(pts_temp[0]) - np.array(pts_temp[1])),
-                             np.linalg.norm(np.array(pts_temp[1]) - np.array(pts_temp[2])),
-                             np.linalg.norm(np.array(pts_temp[2]) - np.array(pts_temp[0]))]
-                    max_idx = np.argmax(dists)
-                    if dists[max_idx] < min(w, h) * 0.28 or dists[max_idx] > max(w, h) * 0.99: continue
-                    if max_idx == 0:   p_mid, p1, p2 = pts_temp[2], pts_temp[0], pts_temp[1]
-                    elif max_idx == 1: p_mid, p1, p2 = pts_temp[0], pts_temp[1], pts_temp[2]
-                    else:              p_mid, p1, p2 = pts_temp[1], pts_temp[0], pts_temp[2]
-                    
-                    if p_mid[1] < min(p1[1], p2[1]) - 10: continue
-                    temp_angle = calculate_angle_from_three_points(p1, p_mid, p2)
-                    if temp_angle < 165.0 or temp_angle > 179.8: continue
-                    if abs(np.linalg.norm(np.array(p1)-np.array(p_mid)) - np.linalg.norm(np.array(p2)-np.array(p_mid))) / max(np.linalg.norm(np.array(p1)-np.array(p_mid)), 1) > 0.48: continue
-                    all_valid_combinations.append({"points": (p1, p_mid, p2), "angle": temp_angle, "span": dists[max_idx]})
+    b, g, r = cv2.split(img)
+    r_16 = r.astype(np.int16)
+    g_16 = g.astype(np.int16)
+    b_16 = b.astype(np.int16)
 
-    if not all_valid_combinations: return img, 0, "失败", []
-    all_valid_combinations.sort(key=lambda x: (-x["span"], -x["angle"]))
+    rg_diff = r_16 - g_16
+    rb_diff = r_16 - b_16
+
+    cascade_thresholds = [
+        {"rg": 75, "rb": 45, "r": 120, "circ": 0.55, "area_min": 12},
+        {"rg": 55, "rb": 40, "r": 100, "circ": 0.45, "area_min": 10},
+        {"rg": 40, "rb": 30, "r": 80, "circ": 0.35, "area_min": 8}
+    ]
     
-    unique_combinations = []
-    seen_mids = []
-    for comp in all_valid_combinations:
-        mid_pt = comp["points"][1]
-        if any(np.linalg.norm(np.array(mid_pt) - np.array(m)) < 35 for m in seen_mids): continue
-        unique_combinations.append(comp)
-        seen_mids.append(mid_pt)
-        if len(unique_combinations) >= 1: break
+    best_set = None
+    min_geometric_error = float('inf')
+    best_horizontal_score = -1
+
+    for pass_idx, th in enumerate(cascade_thresholds):
+        mask = (rg_diff > th["rg"]) & (rb_diff > th["rb"]) & (r_16 > th["r"])
+        mask = mask.astype(np.uint8) * 255
         
-    comp = unique_combinations[0]
-    p1, p_mid, p2 = comp["points"]
-    img_rendered = render_measurement_style(img, p1, p_mid, p2, comp["angle"], 0, "AUTO")
-    return img_rendered, comp["angle"], "成功", unique_combinations
+        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        red_cleaned = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close)
+        
+        contours_red, _ = cv2.findContours(red_cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        candidates = []
+        
+        for cnt in contours_red:
+            area = cv2.contourArea(cnt)
+            if th["area_min"] < area < 2000:
+                perimeter = cv2.arcLength(cnt, True)
+                if perimeter == 0: continue
+                circularity = 4 * np.pi * (area / (perimeter * perimeter))
+                
+                if circularity >= th["circ"]:
+                    M = cv2.moments(cnt)
+                    if M["m00"] != 0:
+                        cX = int(M["m10"] / M["m00"])
+                        cY = int(M["m01"] / M["m00"])
+                        if 0.02 * w < cX < 0.98 * w and 0.02 * h < cY < 0.98 * h:
+                            candidates.append((cX, cY, area))
+        
+        candidates.sort(key=lambda x: x[2], reverse=True)
+        candidates = [c[:2] for c in candidates[:12]]
+                            
+        num_pts = len(candidates)
+        
+        if num_pts >= 3:
+            for i in range(len(candidates)-2):
+                if min_geometric_error < 0.03:
+                    break
+                for j in range(i+1, len(candidates)-1):
+                    if min_geometric_error < 0.03:
+                        break
+                    for k in range(j+1, len(candidates)):
+                        pA, pB, pC = np.array(candidates[i]), np.array(candidates[j]), np.array(candidates[k])
+                        
+                        dAB = np.linalg.norm(pA - pB)
+                        dBC = np.linalg.norm(pB - pC)
+                        dCA = np.linalg.norm(pC - pA)
+                        dists = [dAB, dBC, dCA]
+                        pts_temp = [candidates[i], candidates[j], candidates[k]]
+                        
+                        max_idx = np.argmax(dists)
+                        max_dist = dists[max_idx]
+                        
+                        if max_dist < min(w, h) * 0.30: 
+                            continue 
+                            
+                        if max_idx == 0:   
+                            p_mid, p1, p2 = pts_temp[2], pts_temp[0], pts_temp[1]
+                        elif max_idx == 1: 
+                            p_mid, p1, p2 = pts_temp[0], pts_temp[1], pts_temp[2]
+                        else:              
+                            p_mid, p1, p2 = pts_temp[1], pts_temp[0], pts_temp[2]
+                        
+                        v1 = np.array([p1[0] - p_mid[0], p1[1] - p_mid[1]])
+                        v2 = np.array([p2[0] - p_mid[0], p2[1] - p_mid[1]])
+                        cos_theta = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
+                        temp_angle = np.degrees(np.arccos(np.clip(cos_theta, -1.0, 1.0)))
+                        
+                        if temp_angle < 165 or temp_angle > 179.8:
+                            continue
+                            
+                        len1 = np.linalg.norm(v1)
+                        len2 = np.linalg.norm(v2)
+                        balance_err = abs(len1 - len2) / max(len1, len2, 1)
+                        
+                        if balance_err > 0.15: 
+                            continue 
+                        
+                        # 优化：计算水平/竖直评分，优先选择水平或竖直的连线
+                        # 三点连线的水平程度：计算p1-p2连线与水平线的夹角
+                        line_vec = np.array([p2[0] - p1[0], p2[1] - p1[1]])
+                        horizontal_angle = np.abs(np.arctan2(line_vec[1], line_vec[0]) * 180 / np.pi)
+                        # 接近0度（水平）或90度（竖直）的评分更高
+                        horizontal_score = 1.0 - min(abs(horizontal_angle), abs(horizontal_angle-90), 
+                                                     abs(horizontal_angle-180), abs(horizontal_angle-270)) / 90
+                        
+                        # 综合考虑几何误差和水平/竖直偏好
+                        combined_score = (1.0 - balance_err) * 0.7 + horizontal_score * 0.3
+                        
+                        if combined_score > best_horizontal_score or \
+                           (combined_score == best_horizontal_score and balance_err < min_geometric_error):
+                            min_geometric_error = balance_err
+                            best_horizontal_score = combined_score
+                            best_set = (p1, p_mid, p2)
+    
+            if best_set is not None:
+                break
+
+    if best_set is None:
+        return img, 0, "V27识别失败", "V27"
+        
+    p1, p_mid, p2 = best_set
+    
+    v1, v2 = np.array([p1[0]-p_mid[0], p1[1]-p_mid[1]]), np.array([p2[0]-p_mid[0], p2[1]-p_mid[1]])
+    cos_theta = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
+    angle = np.degrees(np.arccos(np.clip(cos_theta, -1.0, 1.0)))
+    
+    img_rendered = render_measurement_style(img.copy(), p1, p_mid, p2, angle, 0, "AUTO")
+    return img_rendered, angle, "成功", "V27"
+
+# --- V28 增强容错算法 ---
+def process_image_v28(img):
+    if img is None: 
+        return None, 0, "文件读取失败", "V28"
+    
+    h, w = img.shape[:2]
+
+    b, g, r = cv2.split(img)
+    r_16 = r.astype(np.int16)
+    g_16 = g.astype(np.int16)
+    b_16 = b.astype(np.int16)
+
+    rg_diff = r_16 - g_16
+    rb_diff = r_16 - b_16
+
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+
+    cascade_thresholds = [
+        {"rg": 75, "rb": 45, "r": 120, "circ": 0.55, "area_min": 12},
+        {"rg": 55, "rb": 40, "r": 100, "circ": 0.40, "area_min": 8},
+        {"rg": 40, "rb": 30, "r": 80, "circ": 0.25, "area_min": 5},
+        {"mode": "hsv", "h_low": 0, "h_high": 10, "s_low": 30, "v_low": 60, "circ": 0.20, "area_min": 3},
+        {"mode": "hsv", "h_low": 165, "h_high": 180, "s_low": 30, "v_low": 60, "circ": 0.20, "area_min": 3}
+    ]
+    
+    best_set = None
+    min_geometric_error = float('inf')
+
+    for pass_idx, th in enumerate(cascade_thresholds):
+        if th.get("mode") == "hsv":
+            lower_red = np.array([th["h_low"], th["s_low"], th["v_low"]])
+            upper_red = np.array([th["h_high"], 255, 255])
+            mask = cv2.inRange(hsv, lower_red, upper_red)
+        else:
+            mask = (rg_diff > th["rg"]) & (rb_diff > th["rb"]) & (r_16 > th["r"])
+            mask = mask.astype(np.uint8) * 255
+        
+        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        red_cleaned = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close)
+        
+        kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        red_cleaned = cv2.dilate(red_cleaned, kernel_dilate, iterations=1)
+        
+        contours_red, _ = cv2.findContours(red_cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        candidates = []
+        
+        for cnt in contours_red:
+            area = cv2.contourArea(cnt)
+            if th["area_min"] < area < 3000:
+                perimeter = cv2.arcLength(cnt, True)
+                if perimeter == 0: continue
+                circularity = 4 * np.pi * (area / (perimeter * perimeter))
+                
+                if circularity >= th["circ"]:
+                    M = cv2.moments(cnt)
+                    if M["m00"] != 0:
+                        cX = int(M["m10"] / M["m00"])
+                        cY = int(M["m01"] / M["m00"])
+                        if 0.02 * w < cX < 0.98 * w and 0.02 * h < cY < 0.98 * h:
+                            candidates.append((cX, cY, area))
+                            
+        candidates.sort(key=lambda x: x[2], reverse=True)
+        candidates = [c[:2] for c in candidates[:15]]
+                            
+        num_pts = len(candidates)
+        
+        if num_pts >= 3:
+            for i in range(len(candidates)-2):
+                if min_geometric_error < 0.02:
+                    break
+                for j in range(i+1, len(candidates)-1):
+                    if min_geometric_error < 0.02:
+                        break
+                    for k in range(j+1, len(candidates)):
+                        pA, pB, pC = np.array(candidates[i]), np.array(candidates[j]), np.array(candidates[k])
+                        
+                        dAB = np.linalg.norm(pA - pB)
+                        dBC = np.linalg.norm(pB - pC)
+                        dCA = np.linalg.norm(pC - pA)
+                        dists = [dAB, dBC, dCA]
+                        pts_temp = [candidates[i], candidates[j], candidates[k]]
+                        
+                        max_idx = np.argmax(dists)
+                        max_dist = dists[max_idx]
+                        
+                        if max_dist < min(w, h) * 0.30: 
+                            continue 
+                            
+                        if max_idx == 0:   
+                            p_mid, p1, p2 = pts_temp[2], pts_temp[0], pts_temp[1]
+                        elif max_idx == 1: 
+                            p_mid, p1, p2 = pts_temp[0], pts_temp[1], pts_temp[2]
+                        else:              
+                            p_mid, p1, p2 = pts_temp[1], pts_temp[0], pts_temp[2]
+                        
+                        v1 = np.array([p1[0] - p_mid[0], p1[1] - p_mid[1]])
+                        v2 = np.array([p2[0] - p_mid[0], p2[1] - p_mid[1]])
+                        cos_theta = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
+                        temp_angle = np.degrees(np.arccos(np.clip(cos_theta, -1.0, 1.0)))
+                        
+                        if temp_angle < 160 or temp_angle > 179.8:
+                            continue
+                            
+                        len1 = np.linalg.norm(v1)
+                        len2 = np.linalg.norm(v2)
+                        balance_err = abs(len1 - len2) / max(len1, len2, 1)
+                        
+                        if balance_err < min_geometric_error:
+                            min_geometric_error = balance_err
+                            best_set = (p1, p_mid, p2)
+    
+            if best_set is not None:
+                break
+
+    if best_set is None:
+        return img, 0, "V28识别失败", "V28"
+        
+    p1, p_mid, p2 = best_set
+    
+    v1, v2 = np.array([p1[0]-p_mid[0], p1[1]-p_mid[1]]), np.array([p2[0]-p_mid[0], p2[1]-p_mid[1]])
+    cos_theta = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
+    angle = np.degrees(np.arccos(np.clip(cos_theta, -1.0, 1.0)))
+    
+    img_rendered = render_measurement_style(img.copy(), p1, p_mid, p2, angle, 0, "AUTO")
+    return img_rendered, angle, "成功", "V28"
+
+# --- 级联识别主函数：V27优先，失败则V28 ---
+def process_image_cascade(img):
+    MIN_ANGLE = 168.0
+    
+    res_img_v27, angle_v27, status_v27, _ = process_image_v27(img.copy())
+    
+    if status_v27 == "成功" and angle_v27 >= MIN_ANGLE:
+        return res_img_v27, angle_v27, status_v27, "V27"
+    
+    res_img_v28, angle_v28, status_v28, _ = process_image_v28(img.copy())
+    
+    if status_v28 == "成功" and angle_v28 >= MIN_ANGLE:
+        return res_img_v28, angle_v28, status_v28, "V28"
+    
+    fail_reason = "识别失败："
+    if status_v27 == "成功" and angle_v27 < MIN_ANGLE:
+        fail_reason += f"V27识别角度 {angle_v27:.1f}° 低于阈值 {MIN_ANGLE}°；"
+    else:
+        fail_reason += "V27未识别成功；"
+        
+    if status_v28 == "成功" and angle_v28 < MIN_ANGLE:
+        fail_reason += f"V28识别角度 {angle_v28:.1f}° 低于阈值 {MIN_ANGLE}°"
+    else:
+        fail_reason += "V28未识别成功"
+    
+    return img, 0, fail_reason, "失败"
 
 # --- UI 视图展现 ---
 st.set_page_config(page_title="WrapAngle V36 Professional", layout="wide")
@@ -170,15 +378,15 @@ if uploaded_files:
                 nparr = np.frombuffer(b_data, np.uint8)
                 raw_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                 if raw_img is None: continue
-                res_img, ang, status, _ = process_image_v34_core(raw_img.copy())
+                res_img, ang, status, algo_version = process_image_cascade(raw_img.copy())
                 
                 if status == "成功":
                     _, buf = cv2.imencode(".jpg", res_img)
                     st.session_state.success_results[name] = {
-                        "bytes": buf.tobytes(), "angle": f"{ang:.2f}°", "mode": "自动识别"
+                        "bytes": buf.tobytes(), "angle": f"{ang:.2f}°", "mode": f"自动识别({algo_version})"
                     }
                     st.session_state.history_log.append({
-                        "文件名": name, "最终角度": f"{ang:.2f}°", "分析模式": "自动识别", "状态": "✅ 自动通过"
+                        "文件名": name, "最终角度": f"{ang:.2f}°", "分析模式": f"自动识别({algo_version})", "状态": "✅ 自动通过"
                     })
 
 # 分流展示状态看板
@@ -246,8 +454,11 @@ if st.session_state.batch_images:
                 canvas = display_img.copy()
                 for i, pt in enumerate(st.session_state.manual_pts_cache):
                     c_color = (255, 120, 0) if i==0 else ((0, 255, 0) if i==1 else (0, 0, 255))
-                    cv2.circle(canvas, pt, 6, c_color, -1, cv2.LINE_AA)
-                    cv2.putText(canvas, str(i+1), (pt[0]+8, pt[1]-8), cv2.FONT_HERSHEY_DUPLEX, 0.5, c_color, 1, cv2.LINE_AA)
+                    # 绘制十字形状，中心点为点击处
+                    cross_size = 10
+                    cv2.line(canvas, (pt[0] - cross_size, pt[1]), (pt[0] + cross_size, pt[1]), c_color, 2, cv2.LINE_AA)
+                    cv2.line(canvas, (pt[0], pt[1] - cross_size), (pt[0], pt[1] + cross_size), c_color, 2, cv2.LINE_AA)
+                    cv2.putText(canvas, str(i+1), (pt[0]+15, pt[1]-15), cv2.FONT_HERSHEY_DUPLEX, 0.5, c_color, 1, cv2.LINE_AA)
                 
                 if len(st.session_state.manual_pts_cache) == 3:
                     p1, pm, p2 = st.session_state.manual_pts_cache
@@ -274,7 +485,7 @@ if st.session_state.batch_images:
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, "w") as z_out:
                 for f_name, data_obj in st.session_state.success_results.items():
-                    prefix = "Auto_" if data_obj["mode"] == "自动识别" else "Manual_"
+                    prefix = "Auto_" if data_obj["mode"].startswith("自动识别") else "Manual_"
                     z_out.writestr(f"{prefix}{f_name}", data_obj["bytes"])
             
             st.download_button(
