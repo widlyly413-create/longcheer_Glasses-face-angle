@@ -404,6 +404,47 @@ if st.session_state.batch_images:
     
     fail_list = [n for n in st.session_state.batch_images.keys() if n not in st.session_state.success_results]
     
+    # 成功结果展示区（支持单独下载和重新修正）
+    if st.session_state.success_results:
+        st.subheader("✅ 第一步：自动识别成功结果 (支持单独下载和重新修正)")
+        success_names = list(st.session_state.success_results.keys())
+        
+        # 分页显示成功结果
+        page_size = 6
+        total_pages = (len(success_names) + page_size - 1) // page_size
+        current_page = st.selectbox("📄 页码", range(1, total_pages + 1)) - 1
+        start_idx = current_page * page_size
+        end_idx = min(start_idx + page_size, len(success_names))
+        
+        for i, name in enumerate(success_names[start_idx:end_idx]):
+            result = st.session_state.success_results[name]
+            col1, col2, col3 = st.columns([3, 1, 1])
+            
+            with col1:
+                st.image(result["bytes"], caption=f"{name} - {result['angle']} - {result['mode']}", use_column_width=True)
+            
+            with col2:
+                st.download_button(
+                    label="⬇️ 下载",
+                    data=result["bytes"],
+                    file_name=f"Result_{name}",
+                    key=f"dl_{name}",
+                    use_container_width=True
+                )
+            
+            with col3:
+                if st.button(
+                    label="🔄 重新修正",
+                    key=f"retry_{name}",
+                    use_container_width=True,
+                    help="将此图片移回人工修正队列"
+                ):
+                    # 从成功结果中移除，加入待修正队列
+                    del st.session_state.success_results[name]
+                    st.rerun()
+        
+        st.write("---")
+    
     if fail_list:
         st.subheader("🖱️ 第二步：人工高效选点补偿工作区 (零卡顿)")
         selected_fail_file = st.selectbox("🎯 请选择需要补偿修正的故障图片：", fail_list)
