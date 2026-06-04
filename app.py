@@ -441,7 +441,8 @@ if st.session_state.batch_images:
             st.markdown(f"**当前调节目标**: `{target_file}`")
             pt_len = len(st.session_state.click_pts_accumulator)
             
-            st.info(f"📍 请在右图上顺次【单击鼠标左键】：\n1. 左侧红点 ({'🟢 已捕获' if pt_len>=1 else '⚪ 待点击'})\n2. 鼻梁中点 ({'🔴 已捕获' if pt_len>=2 else '⚪ 待点击'})\n3. 右侧红点 ({'🔵 已捕获' if pt_len>=3 else '⚪ 待点击'})")
+            st.info(f"📍 请在右图上使用【框选工具】点击：\n1. 左侧红点 ({'🟢 已捕获' if pt_len>=1 else '⚪ 待点击'})\n2. 鼻梁中点 ({'🔴 已捕获' if pt_len>=2 else '⚪ 待点击'})\n3. 右侧红点 ({'🔵 已捕获' if pt_len>=3 else '⚪ 待点击'})")
+            st.caption("💡 提示：在图片上拖拽一个小框来选择点位置")
             
             if st.button("🗑️ 清空当前点重新选"):
                 st.session_state.click_pts_accumulator = []
@@ -491,8 +492,11 @@ if st.session_state.batch_images:
                 margin=dict(l=0, r=0, t=0, b=0),
                 xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
                 yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-                hovermode=False
+                hovermode=False,
+                dragmode='select'
             )
+            fig.update_xaxes(scaleanchor='y')
+            fig.update_yaxes(scaleanchor='x', scaleratio=1)
             
             # 使用 Streamlit 官方原生整合的事件返回接口，点完直接返回原始像素，永不卡超
             click_data = st.plotly_chart(
@@ -503,11 +507,33 @@ if st.session_state.batch_images:
             )
             
             # 从新版官方规范的数据信封里剥离出精确的前端坐标点位置
-            if click_data and "selection" in click_data and "points" in click_data["selection"]:
-                raw_pts = click_data["selection"]["points"]
-                if len(raw_pts) > 0 and len(st.session_state.click_pts_accumulator) < 3:
-                    new_pt = (int(raw_pts[0]["x"]), int(raw_pts[0]["y"]))
-                    
+            # 兼容多种可能的数据结构
+            raw_pts = None
+            if click_data:
+                if isinstance(click_data, dict):
+                    if "selection" in click_data and "points" in click_data["selection"]:
+                        raw_pts = click_data["selection"]["points"]
+                    elif "box_select" in click_data and click_data["box_select"]:
+                        raw_pts = click_data["box_select"]
+                    elif "lasso_select" in click_data and click_data["lasso_select"]:
+                        raw_pts = click_data["lasso_select"]
+            
+            if raw_pts and len(raw_pts) > 0 and len(st.session_state.click_pts_accumulator) < 3:
+                # 提取坐标，兼容不同的数据格式
+                if isinstance(raw_pts[0], dict):
+                    if "x" in raw_pts[0] and "y" in raw_pts[0]:
+                        new_pt = (int(raw_pts[0]["x"]), int(raw_pts[0]["y"]))
+                    elif "pointNumbers" in raw_pts[0]:
+                        # 处理索引格式
+                        idx = raw_pts[0]["pointNumbers"][0]
+                        h, w = rgb_canvas.shape[:2]
+                        new_pt = (int(idx % w), int(idx // w))
+                    else:
+                        new_pt = None
+                else:
+                    new_pt = None
+                
+                if new_pt:
                     # 坐标查重与物理防抖隔离
                     if not st.session_state.click_pts_accumulator or np.linalg.norm(np.array(st.session_state.click_pts_accumulator[-1]) - np.array(new_pt)) > 6:
                         st.session_state.click_pts_accumulator.append(new_pt)
