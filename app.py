@@ -46,7 +46,7 @@ def render_measurement_style(img, p1, p_mid, p2, angle, group_idx=0, mode_label=
     cv2.putText(img, text, text_pos, font, dyn_font_scale * 0.75, (0,0,0), dyn_font_thick + 1, cv2.LINE_AA)
     cv2.putText(img, text, text_pos, font, dyn_font_scale * 0.75, color, dyn_font_thick, cv2.LINE_AA)
     
-    cv2.putText(img, f"V36 {mode_label} AVG: {angle:.2f} DEG", 
+    cv2.putText(img, f"V38 {mode_label} AVG: {angle:.2f} DEG", 
                 (30, 60), font, dyn_font_scale, (0, 0, 255), dyn_font_thick + 2, cv2.LINE_AA)
     return img
 
@@ -345,9 +345,9 @@ def process_image_cascade(img):
     return img, 0, fail_reason, "失败"
 
 # --- UI 视图展现层 ---
-st.set_page_config(page_title="WrapAngle V36 Professional", layout="wide")
-st.title("👓 面弯角高通量流水线测定系统 (V36 Plotly 云端兼容版)")
-st.caption("完美适配云端环境。采用官方推荐的 Plotly 网页轻量矢量画布，彻底消灭组件超时与本地窗口报错。")
+st.set_page_config(page_title="WrapAngle V38 Cloud", layout="wide")
+st.title("👓 面弯角高通量流水线测定系统 (V38 云端全兼容 Plotly 版)")
+st.caption("完美适配 Streamlit Cloud 无显示器服务器环境。采用官方推荐的 Plotly 网页轻量矢量画布，彻底消灭组件超时与本地窗口报错。")
 
 uploaded_files = st.file_uploader("📥 上传俯视图 / 导入 Zip 压缩包（支持多选混投）", type=['jpg', 'jpeg', 'png', 'zip'], accept_multiple_files=True)
 
@@ -409,7 +409,7 @@ if st.session_state.batch_images:
             st.download_button(
                 label="📥 导出已处理的混合标注图片包 (Zip)",
                 data=zip_buffer.getvalue(),
-                file_name=f"WrapAngle_V36_Combined_{datetime.now().strftime('%m%d_%H%M')}.zip",
+                file_name=f"WrapAngle_V38_Cloud_{datetime.now().strftime('%m%d_%H%M')}.zip",
                 mime="application/zip",
                 use_container_width=True
             )
@@ -425,7 +425,7 @@ if st.session_state.batch_images:
             st.download_button(
                 label="📊 导出完整面弯角数据分析报表 (CSV)",
                 data=df.to_csv(index=False).encode('utf-8-sig'),
-                file_name="WrapAngle_V36_Report.csv",
+                file_name="WrapAngle_V38_Report.csv",
                 mime="text/csv",
                 use_container_width=True
             )
