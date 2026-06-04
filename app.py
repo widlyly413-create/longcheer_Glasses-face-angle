@@ -465,12 +465,33 @@ if st.session_state.batch_images:
                     cv2.line(canvas, p1, pm, (0, 165, 255), 2, cv2.LINE_AA)
                     cv2.line(canvas, pm, p2, (0, 165, 255), 2, cv2.LINE_AA)
                 
-                coord = streamlit_image_coordinates(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB), key=f"canvas_{selected_fail_file}")
-                if coord is not None and len(st.session_state.manual_pts_cache) < 3:
-                    click_pt = (coord["x"], coord["y"])
-                    if not st.session_state.manual_pts_cache or np.linalg.norm(np.array(st.session_state.manual_pts_cache[-1]) - np.array(click_pt)) > 3:
-                        st.session_state.manual_pts_cache.append(click_pt)
-                        st.rerun()
+                # 尝试使用交互式画布，如果失败则回退到普通图片显示
+                try:
+                    coord = streamlit_image_coordinates(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB), key=f"canvas_{selected_fail_file}")
+                    if coord is not None and len(st.session_state.manual_pts_cache) < 3:
+                        click_pt = (coord["x"], coord["y"])
+                        if not st.session_state.manual_pts_cache or np.linalg.norm(np.array(st.session_state.manual_pts_cache[-1]) - np.array(click_pt)) > 3:
+                            st.session_state.manual_pts_cache.append(click_pt)
+                            st.rerun()
+                except Exception as e:
+                    st.warning("⚠️ 交互组件加载失败，请使用下方滑块手动输入坐标")
+                    st.image(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB), use_column_width=True)
+                    
+                    # 备用交互方式：使用滑块输入坐标
+                    with col_control:
+                        st.write("---")
+                        st.subheader("📍 备用坐标输入")
+                        col_x, col_y = st.columns(2)
+                        with col_x:
+                            input_x = st.slider(f"X坐标 (0-{w_disp})", 0, w_disp, w_disp//2, key=f"x_{selected_fail_file}")
+                        with col_y:
+                            input_y = st.slider(f"Y坐标 (0-{h_disp})", 0, h_disp, h_disp//2, key=f"y_{selected_fail_file}")
+                        
+                        if st.button("✅ 添加此坐标点", key=f"add_pt_{selected_fail_file}"):
+                            click_pt = (input_x, input_y)
+                            if not st.session_state.manual_pts_cache or np.linalg.norm(np.array(st.session_state.manual_pts_cache[-1]) - np.array(click_pt)) > 3:
+                                st.session_state.manual_pts_cache.append(click_pt)
+                                st.rerun()
     else:
         st.balloons()
         st.success("🎉 太棒了！全量队列已全部检测完毕，没有任何失败图像！")
