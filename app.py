@@ -436,132 +436,104 @@ if st.session_state.batch_images:
         raw_data = st.session_state.batch_images[target_file]
         orig_img, img_b64, scale = load_and_resize_image(raw_data, max_side=750)
         
-        # 💡 HTML5 局部内嵌画布：点击由用户的浏览器直接计算，不走 WebSocket，速度飞起且绝不报错！
-        html_code = f"""
-        <html>
-        <head>
-            <style>
-                body {{ margin: 0; padding: 0; display: flex; flex-direction: column; align-items: center; font-family: sans-serif; background-color: #f8f9fa; }}
-                #canvas-container {{ position: relative; display: inline-block; box-shadow: 0 4px 10px rgba(0,0,0,0.15); border-radius: 4px; overflow: hidden; }}
-                canvas {{ display: block; cursor: crosshair; }}
-                #info-panel {{ margin: 10px 0; font-size: 14px; font-weight: bold; color: #333; text-align: center; background: #e9ecef; padding: 8px 20px; border-radius: 20px; }}
-                button {{ margin-top: 5px; padding: 6px 15px; background: #dc3545; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: bold; }}
-                button:hover {{ background: #bd2130; }}
-            </style>
-        </head>
-        <body>
-            <div id="info-panel">📍 状态提示：请在下方图上点击【第 1 点：左侧标定点】</div>
-            <div id="canvas-container">
-                <canvas id="paintCanvas"></canvas>
-            </div>
-            <div><button id="resetBtn">🔄 清空重选</button></div>
-
-            <script>
-                const imgB64 = "data:image/jpeg;base64,{img_b64}";
-                const canvas = document.getElementById("paintCanvas");
-                const ctx = canvas.getContext("2d");
-                const infoPanel = document.getElementById("info-panel");
-                const resetBtn = document.getElementById("resetBtn");
-                
-                let img = new Image();
-                img.src = imgB64;
-                
-                let points = [];
-                const colors = ["#ff7800", "#00b4ff", "#00ff00"];
-                const labels = ["1:左侧点", "2:鼻梁中点", "3:右侧点"];
-                
-                img.onload = function() {{
-                    canvas.width = img.width;
-                    canvas.height = img.height;
-                    drawAll();
-                }};
-                
-                function drawAll() {{
-                    ctx.drawImage(img, 0, 0);
-                    
-                    // 实时本地流畅绘制线条骨架
-                    if (points.length >= 2) {{
-                        ctx.beginPath();
-                        ctx.moveTo(points[0].x, points[0].y);
-                        ctx.lineTo(points[1].x, points[1].y);
-                        if (points.length === 3) {{
-                            ctx.lineTo(points[2].x, points[2].y);
-                        }}
-                        ctx.strokeStyle = "#00a5ff";
-                        ctx.lineWidth = 3;
-                        ctx.stroke();
-                    }}
-                    
-                    // 实时本地流畅绘制靶心
-                    points.forEach((pt, idx) => {{
-                        ctx.beginPath();
-                        ctx.arc(pt.x, pt.y, 6, 0, 2 * Math.PI);
-                        ctx.fillStyle = colors[idx];
-                        ctx.fill();
-                        ctx.strokeStyle = "#000000";
-                        ctx.lineWidth = 1.5;
-                        ctx.stroke();
-                        
-                        ctx.fillStyle = "#ffffff";
-                        ctx.strokeStyle = "#000000";
-                        ctx.lineWidth = 3;
-                        ctx.font = "bold 13px sans-serif";
-                        ctx.strokeText(labels[idx], pt.x + 10, pt.y - 10);
-                        ctx.fillText(labels[idx], pt.x + 10, pt.y - 10);
-                    }});
-                }}
-                
-                // 零卡顿的秘密：事件绑定在纯前端，点完3个点前绝不和Streamlit后台通信
-                canvas.addEventListener("click", function(e) {{
-                    if (points.length >= 3) return;
-                    
-                    const rect = canvas.getBoundingClientRect();
-                    const clickX = Math.round(e.clientX - rect.left);
-                    const clickY = Math.round(e.clientY - rect.top);
-                    
-                    points.push({{ x: clickX, y: clickY }});
-                    drawAll();
-                    
-                    if (points.length === 1) {{
-                        infoPanel.innerHTML = "📍 状态提示：请点击【第 2 点：鼻梁中间点】";
-                    }} else if (points.length === 2) {{
-                        infoPanel.innerHTML = "📍 状态提示：请点击【第 3 点：右侧标定点】";
-                    }} else if (points.length === 3) {{
-                        infoPanel.innerHTML = "🎉 选点已满！正在打包上传并执行原图对齐中...";
-                        infoPanel.style.background = "#d4edda";
-                        infoPanel.style.color = "#155724";
-                        
-                        // 触发 URL 参数更新，通知 Streamlit 后台接收数据
-                        const ptData = encodeURIComponent(JSON.stringify(points));
-                        window.history.pushState({{}}, '', window.location.pathname + '?pt_data=' + ptData + '&target=' + encodeURIComponent("{target_file}"));
-                        
-                        // 通过模拟按键触发页面重新运行
-                        setTimeout(() => {{
-                            const event = new KeyboardEvent('keydown', {{ key: 'r', ctrlKey: true }});
-                            window.dispatchEvent(event);
-                        }}, 100);
-                    }}
-                }});
-                
-                resetBtn.addEventListener("click", function() {{
-                    points = [];
-                    infoPanel.innerHTML = "📍 状态提示：请在下方图上点击【第 1 点：左侧标定点】";
-                    infoPanel.style.background = "#e9ecef";
-                    infoPanel.style.color = "#333";
-                    drawAll();
-                    
-                    // 清除 URL 参数
-                    window.history.pushState({{}}, '', window.location.pathname);
-                    const event = new KeyboardEvent('keydown', {{ key: 'r', ctrlKey: true }});
-                    window.dispatchEvent(event);
-                }});
-            </script>
-        </body>
-        </html>
-        """
+        # 💡 纯前端 HTML5 Canvas 点击选点 - 使用 Markdown 方式更稳定
+        st.markdown(f"""
+        <style>
+            #canvas-container {{ position: relative; display: inline-block; box-shadow: 0 4px 10px rgba(0,0,0,0.15); border-radius: 4px; overflow: hidden; }}
+            #paintCanvas {{ display: block; cursor: crosshair; }}
+            #info-panel {{ margin: 10px 0; font-size: 14px; font-weight: bold; color: #333; text-align: center; background: #e9ecef; padding: 8px 20px; border-radius: 20px; }}
+            #resetBtn {{ margin-top: 5px; padding: 6px 15px; background: #dc3545; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: bold; }}
+            #resetBtn:hover {{ background: #bd2130; }}
+        </style>
+        <div id="info-panel">📍 状态提示：请在下方图上点击【第 1 点：左侧标定点】</div>
+        <div id="canvas-container">
+            <canvas id="paintCanvas"></canvas>
+        </div>
+        <div><button id="resetBtn">🔄 清空重选</button></div>
         
-        # 使用 Streamlit 原生 HTML 执行舱进行沙盒隔离注入，完美解决超时与加载报错
-        st.components.v1.html(html_code, height=830, scroller=False)
+        <script>
+            const imgB64 = "data:image/jpeg;base64,{img_b64}";
+            const canvas = document.getElementById("paintCanvas");
+            const ctx = canvas.getContext("2d");
+            const infoPanel = document.getElementById("info-panel");
+            const resetBtn = document.getElementById("resetBtn");
+            const targetFile = "{target_file}";
+            
+            let img = new Image();
+            img.src = imgB64;
+            let points = [];
+            const colors = ["#ff7800", "#00b4ff", "#00ff00"];
+            const labels = ["1:左侧点", "2:鼻梁中点", "3:右侧点"];
+            
+            img.onload = function() {{
+                canvas.width = img.width;
+                canvas.height = img.height;
+                drawAll();
+            }};
+            
+            function drawAll() {{
+                ctx.drawImage(img, 0, 0);
+                if (points.length >= 2) {{
+                    ctx.beginPath();
+                    ctx.moveTo(points[0].x, points[0].y);
+                    ctx.lineTo(points[1].x, points[1].y);
+                    if (points.length === 3) {{
+                        ctx.lineTo(points[2].x, points[2].y);
+                    }}
+                    ctx.strokeStyle = "#00a5ff";
+                    ctx.lineWidth = 3;
+                    ctx.stroke();
+                }}
+                points.forEach((pt, idx) => {{
+                    ctx.beginPath();
+                    ctx.arc(pt.x, pt.y, 6, 0, 2 * Math.PI);
+                    ctx.fillStyle = colors[idx];
+                    ctx.fill();
+                    ctx.strokeStyle = "#000000";
+                    ctx.lineWidth = 1.5;
+                    ctx.stroke();
+                    ctx.fillStyle = "#ffffff";
+                    ctx.strokeStyle = "#000000";
+                    ctx.lineWidth = 3;
+                    ctx.font = "bold 13px sans-serif";
+                    ctx.strokeText(labels[idx], pt.x + 10, pt.y - 10);
+                    ctx.fillText(labels[idx], pt.x + 10, pt.y - 10);
+                }});
+            }}
+            
+            canvas.addEventListener("click", function(e) {{
+                if (points.length >= 3) return;
+                const rect = canvas.getBoundingClientRect();
+                const clickX = Math.round(e.clientX - rect.left);
+                const clickY = Math.round(e.clientY - rect.top);
+                points.push({{ x: clickX, y: clickY }});
+                drawAll();
+                
+                if (points.length === 1) {{
+                    infoPanel.innerHTML = "📍 状态提示：请点击【第 2 点：鼻梁中间点】";
+                }} else if (points.length === 2) {{
+                    infoPanel.innerHTML = "📍 状态提示：请点击【第 3 点：右侧标定点】";
+                }} else if (points.length === 3) {{
+                    infoPanel.innerHTML = "🎉 选点已满！正在打包上传...";
+                    infoPanel.style.background = "#d4edda";
+                    infoPanel.style.color = "#155724";
+                    
+                    const ptData = encodeURIComponent(JSON.stringify(points));
+                    const targetEncoded = encodeURIComponent(targetFile);
+                    window.location.href = window.location.pathname + '?pt_data=' + ptData + '&target=' + targetEncoded;
+                }}
+            }});
+            
+            resetBtn.addEventListener("click", function() {{
+                points = [];
+                infoPanel.innerHTML = "📍 状态提示：请在下方图上点击【第 1 点：左侧标定点】";
+                infoPanel.style.background = "#e9ecef";
+                infoPanel.style.color = "#333";
+                drawAll();
+                window.location.href = window.location.pathname;
+            }});
+        <\/script>
+        """, unsafe_allow_html=True)
         
         # 💡 【后台数据承接与逆映射对齐】
         # 通过 Streamlit Query Params 机制获取 HTML5 前端传递回来的坐标数据
