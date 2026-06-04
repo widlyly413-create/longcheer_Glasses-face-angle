@@ -5,8 +5,7 @@ import zipfile
 import io
 import os
 import pandas as pd
-from datetime import datetime
-import json
+import plotly.express as px
 
 MULTIPLE_COLORS = [
     (255, 120, 0), (0, 180, 255), (0, 255, 0), 
@@ -17,7 +16,8 @@ MULTIPLE_COLORS = [
 if 'batch_images' not in st.session_state: st.session_state.batch_images = {} 
 if 'success_results' not in st.session_state: st.session_state.success_results = {} 
 if 'history_log' not in st.session_state: st.session_state.history_log = []
-if 'last_selected_file' not in st.session_state: st.session_state.last_selected_file = ""
+if 'click_pts_accumulator' not in st.session_state: st.session_state.click_pts_accumulator = []
+if 'current_processing_file' not in st.session_state: st.session_state.current_processing_file = ""
 
 def calculate_angle_from_three_points(p1, p_mid, p2):
     v1 = np.array([p1[0] - p_mid[0], p1[1] - p_mid[1]])
@@ -35,7 +35,6 @@ def render_measurement_style(img, p1, p_mid, p2, angle, group_idx=0, mode_label=
     
     cv2.line(img, p1, p_mid, color, dyn_line, cv2.LINE_AA)
     cv2.line(img, p_mid, p2, color, dyn_line, cv2.LINE_AA)
-    
     for p in [p1, p_mid, p2]:
         cv2.circle(img, p, int(dyn_line * 2.5), color, -1, cv2.LINE_AA)
         cv2.circle(img, p, int(dyn_line * 2.5), (0, 0, 0), 1, cv2.LINE_AA)
@@ -45,19 +44,14 @@ def render_measurement_style(img, p1, p_mid, p2, angle, group_idx=0, mode_label=
     cv2.putText(img, text, text_pos, font, dyn_font_scale * 0.75, (0,0,0), dyn_font_thick + 1, cv2.LINE_AA)
     cv2.putText(img, text, text_pos, font, dyn_font_scale * 0.75, color, dyn_font_thick, cv2.LINE_AA)
     
-    cv2.putText(img, f"V40 {mode_label} AVG: {angle:.2f} DEG", 
-                (30, 60), font, dyn_font_scale, (0, 0, 255), dyn_font_thick + 2, cv2.LINE_AA)
+    cv2.putText(img, f"V40 {mode_label} AVG: {angle:.2f} DEG", (30, 60), font, dyn_font_scale, (0, 0, 255), dyn_font_thick + 2, cv2.LINE_AA)
     return img
 
 @st.cache_data
-def load_and_resize_image(file_bytes, max_side=750):
-    """
-    轻量化等比缩放：将大分辨率图转为 Base64 传递给 HTML 容器
-    """
-    import base64
+def load_and_resize_image(file_bytes, max_side=720):
     nparr = np.frombuffer(file_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    if img is None: return None, "", 1.0
+    if img is None: return None, None, 1.0
     h, w = img.shape[:2]
     scale = 1.0
     if max(h, w) > max_side:
@@ -65,10 +59,7 @@ def load_and_resize_image(file_bytes, max_side=750):
         img_resized = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
     else:
         img_resized = img.copy()
-        
-    _, buffer = cv2.imencode('.jpg', img_resized)
-    img_b64 = base64.b64encode(buffer).decode('utf-8')
-    return img, img_b64, scale
+    return img, img_resized, scale
 
 # --- V27 级联多层检测算法 ---
 def process_image_v27(img):
@@ -350,12 +341,12 @@ def process_image_cascade(img):
     
     return img, 0, fail_reason, "失败"
 
-# --- UI 视图展现层 ---
-st.set_page_config(page_title="WrapAngle V40 PureHTML", layout="wide")
-st.title("👓 面弯角高通量流水线测定系统 (V40 前端无延迟点击选点版)")
-st.caption("完美避开一切第三方自定义组件。点击直接由浏览器本地响应，连线顺滑，零卡顿。点满 3 点后自动安全上传。")
+# --- 主视图渲染 ---
+st.set_page_config(page_title="WrapAngle V40", layout="wide")
+st.title("👓 面弯角高通量流水线测定系统 (V40 云端原生对齐版)")
+st.caption("完美适配云端沙盒环境。放弃 HTML5 组件入侵，改用官方最稳健的图表点击序列。前端毫秒级响应，点满3点自动闭环保存。")
 
-uploaded_files = st.file_uploader("📥 上传俯视图 / 导入 Zip 压缩包", type=['jpg', 'jpeg', 'png', 'zip'], accept_multiple_files=True)
+uploaded_files = st.file_uploader("📥 上传多张俯视图 或 导入 1 个 Zip 压缩包", type=['jpg', 'jpeg', 'png', 'zip'], accept_multiple_files=True)
 
 if uploaded_files:
     new_pool = {}
@@ -373,8 +364,10 @@ if uploaded_files:
     if not st.session_state.batch_images or set(new_pool.keys()) != set(st.session_state.batch_images.keys()):
         st.session_state.batch_images = new_pool
         st.session_state.success_results = {}
+        st.session_state.history_log = []
+        st.session_state.click_pts_accumulator = []
         
-        with st.spinner("🤖 后台智能算法正在快速检测合格品..."):
+        with st.spinner("🤖 后台算法正在快速分流无需介入的合格品..."):
             for name, b_data in st.session_state.batch_images.items():
                 nparr = np.frombuffer(b_data, np.uint8)
                 raw_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -393,12 +386,13 @@ if st.session_state.batch_images:
     fail_count = total_count - success_count
     
     c1, c2, c3 = st.columns(3)
-    c1.metric("📦 图像总数", f"{total_count} 张")
-    c2.metric("🤖 自动识别通过", f"{success_count} 张")
-    c3.metric("🖱️ 需手动补偿", f"{fail_count} 张")
+    c1.metric("📦 图像总流转量", f"{total_count} 张")
+    c2.metric("🤖 后台算法通过", f"{success_count} 张")
+    c3.metric("🖱️ 待手动介入干预", f"{fail_count} 张")
 
+    # --- 数据一键打包下载区 ---
     st.write("---")
-    st.subheader("📥 核心数据成果包下载区")
+    st.subheader("📥 核心成果一键打包下载区")
     
     if st.session_state.success_results:
         col_dl1, col_dl2 = st.columns(2)
@@ -408,171 +402,119 @@ if st.session_state.batch_images:
                 for f_name, data_obj in st.session_state.success_results.items():
                     prefix = "Auto_" if data_obj["mode"].startswith("自动识别") else "Manual_"
                     z_out.writestr(f"{prefix}{f_name}", data_obj["bytes"])
-            st.download_button("📥 导出混合标注结果图片包 (Zip)", zip_buffer.getvalue(), f"WrapAngle_V40_Result.zip", "application/zip", use_container_width=True)
+            st.download_button("📥 导出混合标注结果图片包 (Zip)", zip_buffer.getvalue(), f"WrapAngle_Results_V40.zip", "application/zip", use_container_width=True)
         with col_dl2:
             all_log = []
             for name in st.session_state.batch_images.keys():
                 if name in st.session_state.success_results:
                     obj = st.session_state.success_results[name]
-                    all_log.append({"文件名": name, "最终面弯角": obj["angle"], "分析模式": obj["mode"], "状态": "✅ 成功闭环"})
+                    all_log.append({"文件名": name, "最终测量面弯角": obj["angle"], "分析模式": obj["mode"], "状态": "✅ 成功闭环"})
                 else:
                     all_log.append({"文件名": name, "最终测量面弯角": "-", "分析模式": "未通过", "状态": "❌ 待手动介入"})
             df = pd.DataFrame(all_log)
             st.download_button("📊 导出完整面弯角分析报表 (CSV)", df.to_csv(index=False).encode('utf-8-sig'), "WrapAngle_Report.csv", "text/csv", use_container_width=True)
         st.dataframe(df, use_container_width=True)
 
-    # --- 💡 【核心重构：纯前端 HTML5 零延迟点击池】 ---
+    # --- 鼠标点击全自动补偿区 ---
     st.write("---")
-    st.subheader("🖱️ 手动微调介入选点区 (100% 毫秒级零延迟)")
+    st.subheader("🖱️ 手动异常补偿干预区 (官方原生交互 · 零延迟)")
     
-    target_file = st.selectbox("🎯 请选择需要【进入手动选点】的目标图片：", list(st.session_state.batch_images.keys()))
+    target_file = st.selectbox("🎯 请选择需要【手动微调选点】的目标图片：", list(st.session_state.batch_images.keys()))
     
     if target_file:
+        # 切图时自动清空历史点击残余
+        if st.session_state.current_processing_file != target_file:
+            st.session_state.click_pts_accumulator = []
+            st.session_state.current_processing_file = target_file
+            
         if target_file in st.session_state.success_results:
-            st.warning(f"💡 提示：图片 `{target_file}` 此前已有结果（角度: {st.session_state.success_results[target_file]['angle']}），再次点击保存将直接覆盖。")
+            st.warning(f"💡 提示：图片 `{target_file}` 此前已有结果（角度: {st.session_state.success_results[target_file]['angle']}），执行新点选将直接覆盖。")
         else:
-            st.error(f"🔍 提示：图片 `{target_file}` 自动识别失败。请在下方画面上直接顺次点选：1.左侧红点 -> 2.鼻梁中点 -> 3.右侧红点。")
+            st.error(f"🔍 提示：图片 `{target_file}` 自动识别失败。请在下方画面中，直接连续单击红点。")
             
         raw_data = st.session_state.batch_images[target_file]
-        orig_img, img_b64, scale = load_and_resize_image(raw_data, max_side=750)
+        orig_img, display_img, scale = load_and_resize_image(raw_data, max_side=720)
         
-        # 💡 纯前端 HTML5 Canvas 点击选点 - 使用 Markdown 方式更稳定
-        st.markdown(f"""
-        <style>
-            #canvas-container {{ position: relative; display: inline-block; box-shadow: 0 4px 10px rgba(0,0,0,0.15); border-radius: 4px; overflow: hidden; }}
-            #paintCanvas {{ display: block; cursor: crosshair; }}
-            #info-panel {{ margin: 10px 0; font-size: 14px; font-weight: bold; color: #333; text-align: center; background: #e9ecef; padding: 8px 20px; border-radius: 20px; }}
-            #resetBtn {{ margin-top: 5px; padding: 6px 15px; background: #dc3545; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: bold; }}
-            #resetBtn:hover {{ background: #bd2130; }}
-        </style>
-        <div id="info-panel">📍 状态提示：请在下方图上点击【第 1 点：左侧标定点】</div>
-        <div id="canvas-container">
-            <canvas id="paintCanvas"></canvas>
-        </div>
-        <div><button id="resetBtn">🔄 清空重选</button></div>
+        col_workspace, col_control = st.columns([13, 7])
         
-        <script>
-            const imgB64 = "data:image/jpeg;base64,{img_b64}";
-            const canvas = document.getElementById("paintCanvas");
-            const ctx = canvas.getContext("2d");
-            const infoPanel = document.getElementById("info-panel");
-            const resetBtn = document.getElementById("resetBtn");
-            const targetFile = "{target_file}";
+        with col_control:
+            st.markdown(f"**当前调节目标**: `{target_file}`")
+            pt_len = len(st.session_state.click_pts_accumulator)
             
-            let img = new Image();
-            img.src = imgB64;
-            let points = [];
-            const colors = ["#ff7800", "#00b4ff", "#00ff00"];
-            const labels = ["1:左侧点", "2:鼻梁中点", "3:右侧点"];
+            st.info(f"📍 请在右图上顺次【单击鼠标左键】：\n1. 左侧红点 ({'🟢 已捕获' if pt_len>=1 else '⚪ 待点击'})\n2. 鼻梁中点 ({'🔴 已捕获' if pt_len>=2 else '⚪ 待点击'})\n3. 右侧红点 ({'🔵 已捕获' if pt_len>=3 else '⚪ 待点击'})")
             
-            img.onload = function() {{
-                canvas.width = img.width;
-                canvas.height = img.height;
-                drawAll();
-            }};
-            
-            function drawAll() {{
-                ctx.drawImage(img, 0, 0);
-                if (points.length >= 2) {{
-                    ctx.beginPath();
-                    ctx.moveTo(points[0].x, points[0].y);
-                    ctx.lineTo(points[1].x, points[1].y);
-                    if (points.length === 3) {{
-                        ctx.lineTo(points[2].x, points[2].y);
-                    }}
-                    ctx.strokeStyle = "#00a5ff";
-                    ctx.lineWidth = 3;
-                    ctx.stroke();
-                }}
-                points.forEach((pt, idx) => {{
-                    ctx.beginPath();
-                    ctx.arc(pt.x, pt.y, 6, 0, 2 * Math.PI);
-                    ctx.fillStyle = colors[idx];
-                    ctx.fill();
-                    ctx.strokeStyle = "#000000";
-                    ctx.lineWidth = 1.5;
-                    ctx.stroke();
-                    ctx.fillStyle = "#ffffff";
-                    ctx.strokeStyle = "#000000";
-                    ctx.lineWidth = 3;
-                    ctx.font = "bold 13px sans-serif";
-                    ctx.strokeText(labels[idx], pt.x + 10, pt.y - 10);
-                    ctx.fillText(labels[idx], pt.x + 10, pt.y - 10);
-                }});
-            }}
-            
-            canvas.addEventListener("click", function(e) {{
-                if (points.length >= 3) return;
-                const rect = canvas.getBoundingClientRect();
-                const clickX = Math.round(e.clientX - rect.left);
-                const clickY = Math.round(e.clientY - rect.top);
-                points.push({{ x: clickX, y: clickY }});
-                drawAll();
+            if st.button("🗑️ 清空当前点重新选"):
+                st.session_state.click_pts_accumulator = []
+                st.rerun()
                 
-                if (points.length === 1) {{
-                    infoPanel.innerHTML = "📍 状态提示：请点击【第 2 点：鼻梁中间点】";
-                }} else if (points.length === 2) {{
-                    infoPanel.innerHTML = "📍 状态提示：请点击【第 3 点：右侧标定点】";
-                }} else if (points.length === 3) {{
-                    infoPanel.innerHTML = "🎉 选点已满！正在打包上传...";
-                    infoPanel.style.background = "#d4edda";
-                    infoPanel.style.color = "#155724";
-                    
-                    const ptData = encodeURIComponent(JSON.stringify(points));
-                    const targetEncoded = encodeURIComponent(targetFile);
-                    window.location.href = window.location.pathname + '?pt_data=' + ptData + '&target=' + targetEncoded;
-                }}
-            }});
-            
-            resetBtn.addEventListener("click", function() {{
-                points = [];
-                infoPanel.innerHTML = "📍 状态提示：请在下方图上点击【第 1 点：左侧标定点】";
-                infoPanel.style.background = "#e9ecef";
-                infoPanel.style.color = "#333";
-                drawAll();
-                window.location.href = window.location.pathname;
-            }});
-        <\/script>
-        """, unsafe_allow_html=True)
-        
-        # 💡 【后台数据承接与逆映射对齐】
-        # 通过 Streamlit Query Params 机制获取 HTML5 前端传递回来的坐标数据
-        query_params = st.query_params
-        
-        if "pt_data" in query_params and "target" in query_params:
-            try:
-                pt_data = json.loads(query_params["pt_data"])
-                target_from_params = query_params["target"]
+            # 💡 核心自动化闭环：一满3个点，后台在静默状态下瞬间完成原图映射与对齐计算
+            if pt_len == 3:
+                p1_d, pm_d, p2_d = st.session_state.click_pts_accumulator
+                p1_r = (int(p1_d[0] / scale), int(p1_d[1] / scale))
+                pm_r = (int(pm_d[0] / scale), int(pm_d[1] / scale))
+                p2_r = (int(p2_d[0] / scale), int(p2_d[1] / scale))
                 
-                if target_from_params == target_file and len(pt_data) == 3:
-                    # 将缩放后的坐标还原回原始图片尺寸
-                    p1_r = (int(pt_data[0]["x"] / scale), int(pt_data[0]["y"] / scale))
-                    pm_r = (int(pt_data[1]["x"] / scale), int(pt_data[1]["y"] / scale))
-                    p2_r = (int(pt_data[2]["x"] / scale), int(pt_data[2]["y"] / scale))
-                    
-                    m_angle = calculate_angle_from_three_points(p1_r, pm_r, p2_r)
-                    
-                    with st.expander("📐 计算结果预览", expanded=True):
-                        st.success(f"成功计算面弯角: **{m_angle:.2f}°**")
-                        st.info(f"原始坐标还原：P1={p1_r}, PM={pm_r}, P2={p2_r}")
-                        
-                        if st.button(f"💾 确认保存 {target_file} 的手动测量结果", use_container_width=True):
-                            final_render_img = render_measurement_style(orig_img.copy(), p1_r, pm_r, p2_r, m_angle, 0, "MANUAL")
-                            _, out_buf = cv2.imencode(".jpg", final_render_img)
-                            
-                            st.session_state.success_results[target_file] = {
-                                "bytes": out_buf.tobytes(), "angle": f"{m_angle:.2f}°", "mode": "人工选点"
-                            }
-                            
-                            # 清除 URL 参数
-                            st.query_params.clear()
-                            st.toast(f"图片 {target_file} 的人工手动校准已成功保存！", icon="✅")
-                            st.rerun()
-            except Exception as e:
-                st.warning(f"数据解析异常: {str(e)}")
+                m_angle = calculate_angle_from_three_points(p1_r, pm_r, p2_r)
+                st.success(f"📐 测算面弯角: **{m_angle:.2f}°**")
+                
+                # 统一调用自动化测量完全相同的渲染引擎，格式100%对齐
+                final_render_img = render_measurement_style(orig_img.copy(), p1_r, pm_r, p2_r, m_angle, 0, "MANUAL")
+                _, out_buf = cv2.imencode(".jpg", final_render_img)
+                
+                st.session_state.success_results[target_file] = {
+                    "bytes": out_buf.tobytes(), "angle": f"{m_angle:.2f}°", "mode": "人工选点"
+                }
+                st.session_state.click_pts_accumulator = []
+                st.toast(f"图片 {target_file} 测量结果已自动写入压缩包！", icon="🚀")
+                st.rerun()
 
-    if st.button("🗑️ 清空全量图片缓存"):
+        with col_workspace:
+            # 实时渲染带连线骨架和序号的临时画布，给用户以极其顺畅的反馈
+            canvas = display_img.copy()
+            for idx, pt in enumerate(st.session_state.click_pts_accumulator):
+                c_color = (255, 120, 0) if idx==0 else ((0, 255, 0) if idx==1 else (0, 0, 255))
+                cross = 10
+                cv2.line(canvas, (pt[0] - cross, pt[1]), (pt[0] + cross, pt[1]), c_color, 2, cv2.LINE_AA)
+                cv2.line(canvas, (pt[0], pt[1] - cross), (pt[0], pt[1] + cross), c_color, 2, cv2.LINE_AA)
+                cv2.putText(canvas, str(idx+1), (pt[0]+12, pt[1]-12), cv2.FONT_HERSHEY_DUPLEX, 0.5, c_color, 1, cv2.LINE_AA)
+            
+            if len(st.session_state.click_pts_accumulator) >= 2:
+                cv2.line(canvas, st.session_state.click_pts_accumulator[0], st.session_state.click_pts_accumulator[1], (0, 165, 255), 2, cv2.LINE_AA)
+                if len(st.session_state.click_pts_accumulator) == 3:
+                    cv2.line(canvas, st.session_state.click_pts_accumulator[1], st.session_state.click_pts_accumulator[2], (0, 165, 255), 2, cv2.LINE_AA)
+
+            # 💡 【100% 稳健的官方原生图像点击器】
+            # 将 OpenCV BGR 转为 RGB，使用 Plotly 渲染并激活内置的点击监听器
+            rgb_canvas = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
+            fig = px.imshow(rgb_canvas)
+            fig.update_layout(
+                margin=dict(l=0, r=0, t=0, b=0),
+                xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                hovermode=False
+            )
+            
+            # 使用 Streamlit 官方原生整合的事件返回接口，点完直接返回原始像素，永不卡超
+            click_data = st.plotly_chart(
+                fig, 
+                use_container_width=True, 
+                config={'displayModeBar': False},
+                on_select="rerun"
+            )
+            
+            # 从新版官方规范的数据信封里剥离出精确的前端坐标点位置
+            if click_data and "selection" in click_data and "points" in click_data["selection"]:
+                raw_pts = click_data["selection"]["points"]
+                if len(raw_pts) > 0 and len(st.session_state.click_pts_accumulator) < 3:
+                    new_pt = (int(raw_pts[0]["x"]), int(raw_pts[0]["y"]))
+                    
+                    # 坐标查重与物理防抖隔离
+                    if not st.session_state.click_pts_accumulator or np.linalg.norm(np.array(st.session_state.click_pts_accumulator[-1]) - np.array(new_pt)) > 6:
+                        st.session_state.click_pts_accumulator.append(new_pt)
+                        st.rerun()
+
+    if st.button("🗑️ 清空流水线内所有图片缓存"):
         st.session_state.batch_images = {}
         st.session_state.success_results = {}
-        st.query_params.clear()
+        st.session_state.click_pts_accumulator = []
         st.rerun()
