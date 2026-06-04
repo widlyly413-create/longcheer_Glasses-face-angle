@@ -441,8 +441,8 @@ if st.session_state.batch_images:
             st.markdown(f"**当前调节目标**: `{target_file}`")
             pt_len = len(st.session_state.click_pts_accumulator)
             
-            st.info(f"📍 请在右图上使用【框选工具】点击：\n1. 左侧红点 ({'🟢 已捕获' if pt_len>=1 else '⚪ 待点击'})\n2. 鼻梁中点 ({'🔴 已捕获' if pt_len>=2 else '⚪ 待点击'})\n3. 右侧红点 ({'🔵 已捕获' if pt_len>=3 else '⚪ 待点击'})")
-            st.caption("💡 提示：在图片上拖拽一个小框来选择点位置")
+            st.info(f"📍 请在右图上【直接单击鼠标左键】：\n1. 左侧红点 ({'🟢 已捕获' if pt_len>=1 else '⚪ 待点击'})\n2. 鼻梁中点 ({'🔴 已捕获' if pt_len>=2 else '⚪ 待点击'})\n3. 右侧红点 ({'🔵 已捕获' if pt_len>=3 else '⚪ 待点击'})")
+            st.caption("💡 提示：鼠标会显示为十字准星，点击即可标记")
             
             # 备选方案：手动输入坐标
             st.markdown("---")
@@ -498,60 +498,93 @@ if st.session_state.batch_images:
                 if len(st.session_state.click_pts_accumulator) == 3:
                     cv2.line(canvas, st.session_state.click_pts_accumulator[1], st.session_state.click_pts_accumulator[2], (0, 165, 255), 2, cv2.LINE_AA)
 
-            # 💡 【100% 稳健的官方原生图像点击器】
-            # 将 OpenCV BGR 转为 RGB，使用 Plotly 渲染并激活内置的点击监听器
-            rgb_canvas = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
-            fig = px.imshow(rgb_canvas)
-            fig.update_layout(
-                margin=dict(l=0, r=0, t=0, b=0),
-                xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-                yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-                hovermode=False,
-                dragmode='select'
-            )
-            fig.update_xaxes(scaleanchor='y')
-            fig.update_yaxes(scaleanchor='x', scaleratio=1)
+            # 💡 【原生 HTML5 Canvas - 真正的单点点击】
+            # 使用 base64 编码图片，通过原生 JavaScript 实现真正的单击事件
+            import base64
+            _, buffer = cv2.imencode('.jpg', canvas)
+            img_b64 = base64.b64encode(buffer).decode('utf-8')
+            h, w = canvas.shape[:2]
             
-            # 使用 Streamlit 官方原生整合的事件返回接口，点完直接返回原始像素，永不卡超
-            click_data = st.plotly_chart(
-                fig, 
-                use_container_width=True, 
-                config={'displayModeBar': False},
-                on_select="rerun"
-            )
+            # 生成唯一的画布ID，防止不同图片之间的冲突
+            canvas_id = f"paint_canvas_{target_file.replace('.', '_')}"
             
-            # 从新版官方规范的数据信封里剥离出精确的前端坐标点位置
-            # 兼容多种可能的数据结构
-            raw_pts = None
-            if click_data:
-                if isinstance(click_data, dict):
-                    if "selection" in click_data and "points" in click_data["selection"]:
-                        raw_pts = click_data["selection"]["points"]
-                    elif "box_select" in click_data and click_data["box_select"]:
-                        raw_pts = click_data["box_select"]
-                    elif "lasso_select" in click_data and click_data["lasso_select"]:
-                        raw_pts = click_data["lasso_select"]
-            
-            if raw_pts and len(raw_pts) > 0 and len(st.session_state.click_pts_accumulator) < 3:
-                # 提取坐标，兼容不同的数据格式
-                if isinstance(raw_pts[0], dict):
-                    if "x" in raw_pts[0] and "y" in raw_pts[0]:
-                        new_pt = (int(raw_pts[0]["x"]), int(raw_pts[0]["y"]))
-                    elif "pointNumbers" in raw_pts[0]:
-                        # 处理索引格式
-                        idx = raw_pts[0]["pointNumbers"][0]
-                        h, w = rgb_canvas.shape[:2]
-                        new_pt = (int(idx % w), int(idx // w))
-                    else:
-                        new_pt = None
-                else:
-                    new_pt = None
+            html_code = f"""
+            <style>
+                #{canvas_id} {{
+                    display: block;
+                    cursor: crosshair;
+                    max-width: 100%;
+                    height: auto;
+                    border: 2px solid #ddd;
+                    border-radius: 4px;
+                }}
+            </style>
+            <canvas id="{canvas_id}" width="{w}" height="{h}"></canvas>
+            <script>
+                const canvas = document.getElementById("{canvas_id}");
+                const ctx = canvas.getContext("2d");
+                const img = new Image();
+                img.src = "data:image/jpeg;base64,{img_b64}";
+                img.onload = function() {{
+                    ctx.drawImage(img, 0, 0);
+                }};
                 
-                if new_pt:
-                    # 坐标查重与物理防抖隔离
-                    if not st.session_state.click_pts_accumulator or np.linalg.norm(np.array(st.session_state.click_pts_accumulator[-1]) - np.array(new_pt)) > 6:
-                        st.session_state.click_pts_accumulator.append(new_pt)
-                        st.rerun()
+                canvas.addEventListener("click", function(e) {{
+                    const rect = canvas.getBoundingClientRect();
+                    const scaleX = canvas.width / rect.width;
+                    const scaleY = canvas.height / rect.height;
+                    const x = Math.round((e.clientX - rect.left) * scaleX);
+                    const y = Math.round((e.clientY - rect.top) * scaleY);
+                    
+                    // 通过隐藏输入框传递坐标
+                    const input = document.createElement('input');
+                    input.type = 'hidden';
+                    input.name = 'canvas_click';
+                    input.value = JSON.stringify({{x: x, y: y, file: "{target_file}"}});
+                    document.body.appendChild(input);
+                    
+                    // 模拟表单提交触发页面刷新
+                    const event = new Event('submit');
+                    const form = document.createElement('form');
+                    form.appendChild(input);
+                    document.body.appendChild(form);
+                    form.dispatchEvent(event);
+                    form.remove();
+                    
+                    // 也可以通过 URL 参数传递
+                    const params = new URLSearchParams(window.location.search);
+                    params.set('click_x', x);
+                    params.set('click_y', y);
+                    params.set('click_file', "{target_file}");
+                    window.history.replaceState({{}}, '', window.location.pathname + '?' + params.toString());
+                    
+                    // 触发页面重新运行
+                    setTimeout(() => {{
+                        window.location.reload();
+                    }}, 50);
+                }});
+            <\/script>
+            """
+            st.markdown(html_code, unsafe_allow_html=True)
+            
+            # 从 URL 参数获取点击坐标
+            import urllib.parse
+            try:
+                query_params = st.query_params
+                if 'click_x' in query_params and 'click_y' in query_params and 'click_file' in query_params:
+                    click_x = int(query_params['click_x'])
+                    click_y = int(query_params['click_y'])
+                    click_file = urllib.parse.unquote(query_params['click_file'])
+                    
+                    if click_file == target_file and len(st.session_state.click_pts_accumulator) < 3:
+                        new_pt = (click_x, click_y)
+                        if not st.session_state.click_pts_accumulator or np.linalg.norm(np.array(st.session_state.click_pts_accumulator[-1]) - np.array(new_pt)) > 6:
+                            st.session_state.click_pts_accumulator.append(new_pt)
+                            # 清除 URL 参数
+                            st.query_params.clear()
+                            st.rerun()
+            except Exception as e:
+                pass
 
     if st.button("🗑️ 清空流水线内所有图片缓存"):
         st.session_state.batch_images = {}
