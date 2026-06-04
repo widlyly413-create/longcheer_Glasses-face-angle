@@ -444,6 +444,20 @@ if st.session_state.batch_images:
             st.info(f"📍 请在右图上使用【框选工具】点击：\n1. 左侧红点 ({'🟢 已捕获' if pt_len>=1 else '⚪ 待点击'})\n2. 鼻梁中点 ({'🔴 已捕获' if pt_len>=2 else '⚪ 待点击'})\n3. 右侧红点 ({'🔵 已捕获' if pt_len>=3 else '⚪ 待点击'})")
             st.caption("💡 提示：在图片上拖拽一个小框来选择点位置")
             
+            # 备选方案：手动输入坐标
+            st.markdown("---")
+            st.subheader("🔧 备选：手动输入坐标")
+            h, w = display_img.shape[:2]
+            input_x = st.slider(f"X坐标 (0-{w-1})", 0, w-1, w//2, key=f"x_{target_file}")
+            input_y = st.slider(f"Y坐标 (0-{h-1})", 0, h-1, h//2, key=f"y_{target_file}")
+            
+            if st.button(f"📍 添加点 ({input_x}, {input_y})"):
+                new_pt = (input_x, input_y)
+                if len(st.session_state.click_pts_accumulator) < 3:
+                    if not st.session_state.click_pts_accumulator or np.linalg.norm(np.array(st.session_state.click_pts_accumulator[-1]) - np.array(new_pt)) > 6:
+                        st.session_state.click_pts_accumulator.append(new_pt)
+                        st.rerun()
+            
             if st.button("🗑️ 清空当前点重新选"):
                 st.session_state.click_pts_accumulator = []
                 st.rerun()
