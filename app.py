@@ -402,144 +402,19 @@ if st.session_state.batch_images:
 
     st.write("---")
     
+    # --- 第一步：核心成果包导出（静默打包，不渲染图片）---
+    st.subheader("📥 核心成果包导出")
+    
     fail_list = [n for n in st.session_state.batch_images.keys() if n not in st.session_state.success_results]
     
-    # 成功结果展示区（支持单独下载和重新修正）
-    if st.session_state.success_results:
-        st.subheader("✅ 第一步：自动识别成功结果 (支持单独下载和重新修正)")
-        success_names = list(st.session_state.success_results.keys())
-        
-        # 分页显示成功结果
-        page_size = 6
-        total_pages = (len(success_names) + page_size - 1) // page_size
-        current_page = st.selectbox("📄 页码", range(1, total_pages + 1)) - 1
-        start_idx = current_page * page_size
-        end_idx = min(start_idx + page_size, len(success_names))
-        
-        for i, name in enumerate(success_names[start_idx:end_idx]):
-            result = st.session_state.success_results[name]
-            col1, col2, col3 = st.columns([3, 1, 1])
-            
-            with col1:
-                st.image(result["bytes"], caption=f"{name} - {result['angle']} - {result['mode']}", use_column_width=True)
-            
-            with col2:
-                st.download_button(
-                    label="⬇️ 下载",
-                    data=result["bytes"],
-                    file_name=f"Result_{name}",
-                    key=f"dl_{name}",
-                    use_container_width=True
-                )
-            
-            with col3:
-                if st.button(
-                    label="🔄 重新修正",
-                    key=f"retry_{name}",
-                    use_container_width=True,
-                    help="将此图片移回人工修正队列"
-                ):
-                    # 从成功结果中移除，加入待修正队列
-                    del st.session_state.success_results[name]
-                    st.rerun()
-        
-        st.write("---")
-    
-    if fail_list:
-        st.subheader("🖱️ 第二步：人工高效选点补偿工作区 (零卡顿)")
-        selected_fail_file = st.selectbox("🎯 请选择需要补偿修正的故障图片：", fail_list)
-        
-        if selected_fail_file:
-            raw_data = st.session_state.batch_images[selected_fail_file]
-            orig_img, display_img, scale = load_and_resize_image(raw_data)
-            h_orig, w_orig = orig_img.shape[:2]
-            h_disp, w_disp = display_img.shape[:2]
-            
-            col_workspace, col_control = st.columns([2, 1])
-            
-            with col_control:
-                st.markdown(f"**当前处理图片**: `{selected_fail_file}`")
-                st.markdown(f"原始分辨率: `{w_orig}×{h_orig}` → 交互画布已被优化至: `{w_disp}×{h_disp}`")
-                
-                pt_len = len(st.session_state.manual_pts_cache)
-                st.info(f"💡 请在左图上顺次点击红点：\n1. 左侧点 ({'已捕获' if pt_len>=1 else '待点击'}) \n2. 鼻梁中点 ({'已捕获' if pt_len>=2 else '待点击'}) \n3. 右侧点 ({'已捕获' if pt_len>=3 else '待点击'})")
-                
-                if st.button("🗑️ 清空重选", key="clear_points"):
-                    st.session_state.manual_pts_cache = []
-                    st.rerun()
-                    
-                if pt_len == 3:
-                    p1_d, pm_d, p2_d = st.session_state.manual_pts_cache
-                    p1_r = (int(p1_d[0] / scale), int(p1_d[1] / scale))
-                    pm_r = (int(pm_d[0] / scale), int(pm_d[1] / scale))
-                    p2_r = (int(p2_d[0] / scale), int(p2_d[1] / scale))
-                    
-                    m_angle = calculate_angle_from_three_points(p1_r, pm_r, p2_r)
-                    st.success(f"📐 测算对面弯角: **{m_angle:.2f}°**")
-                    
-                    if st.button("💾 确认并强行写入合规包", key="save_to_pool"):
-                        final_render_img = render_measurement_style(orig_img.copy(), p1_r, pm_r, p2_r, m_angle, 0, "MANUAL")
-                        _, out_buf = cv2.imencode(".jpg", final_render_img)
-                        
-                        st.session_state.success_results[selected_fail_file] = {
-                            "bytes": out_buf.tobytes(), "angle": f"{m_angle:.2f}°", "mode": "人工选点"
-                        }
-                        st.session_state.history_log.append({
-                            "文件名": selected_fail_file, "最终角度": f"{m_angle:.2f}°", "分析模式": "人工选点", "状态": "✍️ 人工补偿通过"
-                        })
-                        st.session_state.manual_pts_cache = []
-                        st.toast(f"{selected_fail_file} 已成功闭环！", icon="🚀")
-                        st.rerun()
-
-            with col_workspace:
-                canvas = display_img.copy()
-                for i, pt in enumerate(st.session_state.manual_pts_cache):
-                    c_color = (255, 120, 0) if i==0 else ((0, 255, 0) if i==1 else (0, 0, 255))
-                    # 绘制十字形状，中心点为点击处
-                    cross_size = 10
-                    cv2.line(canvas, (pt[0] - cross_size, pt[1]), (pt[0] + cross_size, pt[1]), c_color, 2, cv2.LINE_AA)
-                    cv2.line(canvas, (pt[0], pt[1] - cross_size), (pt[0], pt[1] + cross_size), c_color, 2, cv2.LINE_AA)
-                    cv2.putText(canvas, str(i+1), (pt[0]+15, pt[1]-15), cv2.FONT_HERSHEY_DUPLEX, 0.5, c_color, 1, cv2.LINE_AA)
-                
-                if len(st.session_state.manual_pts_cache) == 3:
-                    p1, pm, p2 = st.session_state.manual_pts_cache
-                    cv2.line(canvas, p1, pm, (0, 165, 255), 2, cv2.LINE_AA)
-                    cv2.line(canvas, pm, p2, (0, 165, 255), 2, cv2.LINE_AA)
-                
-                # 尝试使用交互式画布，如果失败则回退到普通图片显示
-                try:
-                    coord = streamlit_image_coordinates(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB), key=f"canvas_{selected_fail_file}")
-                    if coord is not None and len(st.session_state.manual_pts_cache) < 3:
-                        click_pt = (coord["x"], coord["y"])
-                        if not st.session_state.manual_pts_cache or np.linalg.norm(np.array(st.session_state.manual_pts_cache[-1]) - np.array(click_pt)) > 3:
-                            st.session_state.manual_pts_cache.append(click_pt)
-                            st.rerun()
-                except Exception as e:
-                    st.warning("⚠️ 交互组件加载失败，请使用下方滑块手动输入坐标")
-                    st.image(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB), use_column_width=True)
-                    
-                    # 备用交互方式：使用滑块输入坐标
-                    with col_control:
-                        st.write("---")
-                        st.subheader("📍 备用坐标输入")
-                        col_x, col_y = st.columns(2)
-                        with col_x:
-                            input_x = st.slider(f"X坐标 (0-{w_disp})", 0, w_disp, w_disp//2, key=f"x_{selected_fail_file}")
-                        with col_y:
-                            input_y = st.slider(f"Y坐标 (0-{h_disp})", 0, h_disp, h_disp//2, key=f"y_{selected_fail_file}")
-                        
-                        if st.button("✅ 添加此坐标点", key=f"add_pt_{selected_fail_file}"):
-                            click_pt = (input_x, input_y)
-                            if not st.session_state.manual_pts_cache or np.linalg.norm(np.array(st.session_state.manual_pts_cache[-1]) - np.array(click_pt)) > 3:
-                                st.session_state.manual_pts_cache.append(click_pt)
-                                st.rerun()
-    else:
-        st.balloons()
-        st.success("🎉 太棒了！全量队列已全部检测完毕，没有任何失败图像！")
-
-    # --- 第三步：一键打包混下载区 ---
-    st.write("---")
-    st.subheader("📥 第三步：全量混合测量数据导出包")
+    all_log = []
+    for name in st.session_state.batch_images.keys():
+        if name in st.session_state.success_results:
+            obj = st.session_state.success_results[name]
+            all_log.append({"文件名": name, "最终测量面弯角": obj["angle"], "测量模式": obj["mode"], "状态": "✅ 成功闭环"})
+        else:
+            all_log.append({"文件名": name, "最终测量面弯角": "-", "测量模式": "未通过", "状态": "❌ 待手动介入"})
+    df = pd.DataFrame(all_log)
     
     if st.session_state.success_results:
         col_dl1, col_dl2 = st.columns(2)
@@ -551,21 +426,13 @@ if st.session_state.batch_images:
                     z_out.writestr(f"{prefix}{f_name}", data_obj["bytes"])
             
             st.download_button(
-                label="📥 导出已处理的混合标注图片包 (Zip)",
+                label="📥 导出已处理的混合标注图片包 (Zip) - 无需等待页面加载",
                 data=zip_buffer.getvalue(),
                 file_name=f"WrapAngle_V36_Combined_{datetime.now().strftime('%m%d_%H%M')}.zip",
                 mime="application/zip",
                 use_container_width=True
             )
         with col_dl2:
-            all_log = []
-            for name in st.session_state.batch_images.keys():
-                if name in st.session_state.success_results:
-                    obj = st.session_state.success_results[name]
-                    all_log.append({"文件名": name, "最终测量面弯角": obj["angle"], "测量模式": obj["mode"], "检测结果": "通过"})
-                else:
-                    all_log.append({"文件名": name, "最终测量面弯角": "-", "测量模式": "未检测", "检测结果": "失败/待人工选点"})
-            df = pd.DataFrame(all_log)
             st.download_button(
                 label="📊 导出完整面弯角数据分析报表 (CSV)",
                 data=df.to_csv(index=False).encode('utf-8-sig'),
@@ -573,5 +440,119 @@ if st.session_state.batch_images:
                 mime="text/csv",
                 use_container_width=True
             )
-            
+        
         st.dataframe(df, use_container_width=True)
+    
+    # --- 第二步：自主挂号式手动选点工作区 ---
+    st.write("---")
+    st.subheader("🖱️ 手动异常补偿干预区")
+    
+    if 'manual_edit_mode' not in st.session_state:
+        st.session_state.manual_edit_mode = False
+    if 'selected_manual_file' not in st.session_state:
+        st.session_state.selected_manual_file = None
+    
+    all_files = list(st.session_state.batch_images.keys())
+    target_file = st.selectbox("🎯 请选择需要【进入手动微调】的目标图片：", all_files, index=0 if all_files else None)
+    
+    if target_file:
+        is_already_success = target_file in st.session_state.success_results
+        if is_already_success:
+            st.warning(f"💡 提示：图片 `{target_file}` 此前已由【{st.session_state.success_results[target_file]['mode']}】成功生成结果，再次点击保存将覆盖原纪录。")
+        else:
+            st.error(f"🔍 提示：图片 `{target_file}` 自动识别失败，需人工介入。")
+        
+        col_btn1, col_btn2 = st.columns(2)
+        with col_btn1:
+            if st.button("🚪 进入手动微调", key="enter_manual_mode", use_container_width=True):
+                st.session_state.manual_edit_mode = True
+                st.session_state.selected_manual_file = target_file
+                st.session_state.manual_pts_cache = []
+                st.rerun()
+        with col_btn2:
+            if st.button("🚪 退出手动模式", key="exit_manual_mode", use_container_width=True, disabled=not st.session_state.manual_edit_mode):
+                st.session_state.manual_edit_mode = False
+                st.session_state.selected_manual_file = None
+                st.session_state.manual_pts_cache = []
+                st.rerun()
+        
+        if st.session_state.manual_edit_mode and st.session_state.selected_manual_file == target_file:
+            raw_data = st.session_state.batch_images[target_file]
+            orig_img, display_img, scale = load_and_resize_image(raw_data)
+            h_orig, w_orig = orig_img.shape[:2]
+            h_disp, w_disp = display_img.shape[:2]
+            
+            col_workspace, col_control = st.columns([2, 1])
+            
+            with col_control:
+                st.markdown(f"**当前调节目标**: `{target_file}`")
+                pt_len = len(st.session_state.manual_pts_cache)
+                st.info(f"📍 请在左图顺次点击：\n1. 左侧点 ({'🟢 已捕获' if pt_len>=1 else '⚪ 待点击'}) \n2. 鼻梁中点 ({'🔴 已捕获' if pt_len>=2 else '⚪ 待点击'}) \n3. 右侧点 ({'🔵 已捕获' if pt_len>=3 else '⚪ 待点击'})")
+                
+                if st.button("🗑️ 清空当前点重新选", key="clear_points"):
+                    st.session_state.manual_pts_cache = []
+                    st.rerun()
+                    
+                if pt_len == 3:
+                    p1_d, pm_d, p2_d = st.session_state.manual_pts_cache
+                    p1_r = (int(p1_d[0] / scale), int(p1_d[1] / scale))
+                    pm_r = (int(pm_d[0] / scale), int(pm_d[1] / scale))
+                    p2_r = (int(p2_d[0] / scale), int(p2_d[1] / scale))
+                    
+                    m_angle = calculate_angle_from_three_points(p1_r, pm_r, p2_r)
+                    st.success(f"📐 鼠标解算面弯角: **{m_angle:.2f}°**")
+                    
+                    if st.button("💾 确认并将此图强制计入压缩包", key="save_to_pool"):
+                        final_render_img = render_measurement_style(orig_img.copy(), p1_r, pm_r, p2_r, m_angle, 0, "MANUAL")
+                        _, out_buf = cv2.imencode(".jpg", final_render_img)
+                        
+                        st.session_state.success_results[target_file] = {
+                            "bytes": out_buf.tobytes(), "angle": f"{m_angle:.2f}°", "mode": "人工选点"
+                        }
+                        st.session_state.manual_pts_cache = []
+                        st.session_state.manual_edit_mode = False
+                        st.toast(f"图片 {target_file} 修正记录已刷新！", icon="🚀")
+                        st.rerun()
+
+            with col_workspace:
+                canvas = display_img.copy()
+                for i, pt in enumerate(st.session_state.manual_pts_cache):
+                    c_color = (255, 120, 0) if i==0 else ((0, 255, 0) if i==1 else (0, 0, 255))
+                    cross = 8
+                    cv2.line(canvas, (pt[0] - cross, pt[1]), (pt[0] + cross, pt[1]), c_color, 2, cv2.LINE_AA)
+                    cv2.line(canvas, (pt[0], pt[1] - cross), (pt[0], pt[1] + cross), c_color, 2, cv2.LINE_AA)
+                    cv2.putText(canvas, str(i+1), (pt[0]+12, pt[1]-12), cv2.FONT_HERSHEY_DUPLEX, 0.5, c_color, 1, cv2.LINE_AA)
+                
+                if len(st.session_state.manual_pts_cache) == 3:
+                    p1, pm, p2 = st.session_state.manual_pts_cache
+                    cv2.line(canvas, p1, pm, (0, 165, 255), 2, cv2.LINE_AA)
+                    cv2.line(canvas, pm, p2, (0, 165, 255), 2, cv2.LINE_AA)
+                
+                # --- 💡 【核心报错双弹簧容错防御机制】 ---
+                try:
+                    coord = streamlit_image_coordinates(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB), key=f"canvas_{target_file}")
+                    if coord is not None and len(st.session_state.manual_pts_cache) < 3:
+                        click_pt = (coord["x"], coord["y"])
+                        if not st.session_state.manual_pts_cache or np.linalg.norm(np.array(st.session_state.manual_pts_cache[-1]) - np.array(click_pt)) > 3:
+                            st.session_state.manual_pts_cache.append(click_pt)
+                            st.rerun()
+                except Exception:
+                    st.warning("⚠️ 检测到当前服务器前端组件握手超时，已启动滑块坐标备用补偿方案：")
+                    st.image(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB), use_column_width=True)
+                    
+                    with col_control:
+                        st.write("---")
+                        st.caption("滑块精细坐标调节面板")
+                        sl_x = st.slider(f"X 轴像素偏移 (0-{w_disp})", 0, w_disp, w_disp // 2, key=f"sl_x_{target_file}")
+                        sl_y = st.slider(f"Y 轴像素偏移 (0-{h_disp})", 0, h_disp, h_disp // 2, key=f"sl_y_{target_file}")
+                        if st.button("➕ 确认以此滑块坐标作为一个标定点", key=f"btn_sl_{target_file}"):
+                            st.session_state.manual_pts_cache.append((sl_x, sl_y))
+                            st.rerun()
+    
+    if st.button("🗑️ 清空流水线内所有图片缓存（重新上传前点击）"):
+        st.session_state.batch_images = {}
+        st.session_state.success_results = {}
+        st.session_state.manual_pts_cache = []
+        st.session_state.manual_edit_mode = False
+        st.session_state.selected_manual_file = None
+        st.rerun()
