@@ -26,6 +26,9 @@ def calculate_angle_from_three_points(p1, p_mid, p2):
     return np.degrees(np.arccos(np.clip(cos_theta, -1.0, 1.0)))
 
 def render_measurement_style(img, p1, p_mid, p2, angle, group_idx=0, mode_label="AUTO"):
+    """
+    统一格式渲染引擎：确保自动识别和人工选点的文字、字体、圆圈、线宽等100%镜像一致
+    """
     h, w = img.shape[:2]
     dyn_line = max(2, int(w / 600))        
     dyn_font_scale = w / 1500              
@@ -45,12 +48,16 @@ def render_measurement_style(img, p1, p_mid, p2, angle, group_idx=0, mode_label=
     cv2.putText(img, text, text_pos, font, dyn_font_scale * 0.75, (0,0,0), dyn_font_thick + 1, cv2.LINE_AA)
     cv2.putText(img, text, text_pos, font, dyn_font_scale * 0.75, color, dyn_font_thick, cv2.LINE_AA)
     
+    # 左上角大版本水印
     cv2.putText(img, f"V36 {mode_label} AVG: {angle:.2f} DEG", 
                 (30, 60), font, dyn_font_scale, (0, 0, 255), dyn_font_thick + 2, cv2.LINE_AA)
     return img
 
 @st.cache_data
 def load_and_resize_image(file_bytes, max_side=800):
+    """
+    硬核防卡顿的核心：将大分辨率图等比缩放为前端轻量画布图，换算scale
+    """
     nparr = np.frombuffer(file_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if img is None: return None, None, 1.0
@@ -132,7 +139,7 @@ def process_image_v34_core(img):
         if any(np.linalg.norm(np.array(mid_pt) - np.array(m)) < 35 for m in seen_mids): continue
         unique_combinations.append(comp)
         seen_mids.append(mid_pt)
-        if len(unique_combinations) >= 1: break
+        if len(unique_combinations) >= 1: break # 基础批量自动解析取最优一组
         
     comp = unique_combinations[0]
     p1, p_mid, p2 = comp["points"]
@@ -148,6 +155,7 @@ st.caption("专为大规模散图和压缩包定制。自动识别失败的图�
 uploaded_files = st.file_uploader("📥 第一步：上传多张俯视图 或 一个 Zip 压缩包（可多选混投）", type=['jpg', 'jpeg', 'png', 'zip'], accept_multiple_files=True)
 
 if uploaded_files:
+    # 检查是否有新文件注入，若有则重置处理池
     new_pool = {}
     for f in uploaded_files:
         if f.name.lower().endswith('.zip'):
@@ -160,11 +168,13 @@ if uploaded_files:
         else:
             new_pool[f.name] = f.read()
             
+    # 如果载入了全新的数据集，触发流控池更新
     if not st.session_state.batch_images or set(new_pool.keys()) != set(st.session_state.batch_images.keys()):
         st.session_state.batch_images = new_pool
         st.session_state.success_results = {}
         st.session_state.history_log = []
         
+        # 立即启动一轮全量自动化快检
         with st.spinner("🤖 正在启动后台算法流水线，快速分流合格品..."):
             for name, b_data in st.session_state.batch_images.items():
                 nparr = np.frombuffer(b_data, np.uint8)
@@ -194,10 +204,12 @@ if st.session_state.batch_images:
 
     st.write("---")
     
+    # 建立失败品待处理队列
     fail_list = [n for n in st.session_state.batch_images.keys() if n not in st.session_state.success_results]
     
     if fail_list:
         st.subheader("🖱️ 第二步：人工高效选点补偿工作区 (零卡顿)")
+        # 就像播放列表切歌一样，一次只处理一张失败的图
         selected_fail_file = st.selectbox("🎯 请选择需要补偿修正的故障图片：", fail_list)
         
         if selected_fail_file:
@@ -220,7 +232,9 @@ if st.session_state.batch_images:
                     st.rerun()
                     
                 if pt_len == 3:
+                    # 3点捕获后直接触发换算与解算
                     p1_d, pm_d, p2_d = st.session_state.manual_pts_cache
+                    # 极其平滑的无误差等比坐标映射回原图
                     p1_r = (int(p1_d[0] / scale), int(p1_d[1] / scale))
                     pm_r = (int(pm_d[0] / scale), int(pm_d[1] / scale))
                     p2_r = (int(p2_d[0] / scale), int(p2_d[1] / scale))
@@ -229,20 +243,23 @@ if st.session_state.batch_images:
                     st.success(f"📐 测算对面弯角: **{m_angle:.2f}°**")
                     
                     if st.button("💾 确认并强行写入合规包", key="save_to_pool"):
+                        # 在高清晰度原图上采用通用渲染引擎打上相同印记
                         final_render_img = render_measurement_style(orig_img.copy(), p1_r, pm_r, p2_r, m_angle, 0, "MANUAL")
                         _, out_buf = cv2.imencode(".jpg", final_render_img)
                         
+                        # 强行塞入成功池并刷新日志
                         st.session_state.success_results[selected_fail_file] = {
                             "bytes": out_buf.tobytes(), "angle": f"{m_angle:.2f}°", "mode": "人工选点"
                         }
                         st.session_state.history_log.append({
                             "文件名": selected_fail_file, "最终角度": f"{m_angle:.2f}°", "分析模式": "人工选点", "状态": "✍️ 人工补偿通过"
                         })
-                        st.session_state.manual_pts_cache = []
+                        st.session_state.manual_pts_cache = [] # 释放缓存给下一张图
                         st.toast(f"{selected_fail_file} 已成功闭环！", icon="🚀")
                         st.rerun()
 
             with col_workspace:
+                # 在缩放图上绘出当前的临时视觉点击痕迹（线宽根据 display 调整，不卡顿）
                 canvas = display_img.copy()
                 for i, pt in enumerate(st.session_state.manual_pts_cache):
                     c_color = (255, 120, 0) if i==0 else ((0, 255, 0) if i==1 else (0, 0, 255))
@@ -254,6 +271,7 @@ if st.session_state.batch_images:
                     cv2.line(canvas, p1, pm, (0, 165, 255), 2, cv2.LINE_AA)
                     cv2.line(canvas, pm, p2, (0, 165, 255), 2, cv2.LINE_AA)
                 
+                # 核心高效前端组件：绝无后台红点二次重运算，点击即记录
                 coord = streamlit_image_coordinates(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB), key=f"canvas_{selected_fail_file}")
                 if coord is not None and len(st.session_state.manual_pts_cache) < 3:
                     click_pt = (coord["x"], coord["y"])
@@ -271,6 +289,7 @@ if st.session_state.batch_images:
     if st.session_state.success_results:
         col_dl1, col_dl2 = st.columns(2)
         with col_dl1:
+            # 在后台组织打包二进制
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, "w") as z_out:
                 for f_name, data_obj in st.session_state.success_results.items():
@@ -285,6 +304,7 @@ if st.session_state.batch_images:
                 use_container_width=True
             )
         with col_dl2:
+            # 整理一份数据报表同步下载
             all_log = []
             for name in st.session_state.batch_images.keys():
                 if name in st.session_state.success_results:
