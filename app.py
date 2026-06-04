@@ -6,6 +6,8 @@ import io
 import os
 import pandas as pd
 import plotly.express as px
+import json
+import urllib.parse
 
 MULTIPLE_COLORS = [
     (255, 120, 0), (0, 180, 255), (0, 255, 0), 
@@ -484,87 +486,191 @@ if st.session_state.batch_images:
                 if len(st.session_state.click_pts_accumulator) == 3:
                     cv2.line(canvas, st.session_state.click_pts_accumulator[1], st.session_state.click_pts_accumulator[2], (0, 165, 255), 2, cv2.LINE_AA)
 
-            # 💡 【st.dataframe 坐标容器 + 图像背景点击方案】
-            # 使用 st.dataframe 作为点击容器，配合 CSS 背景图实现纯鼠标点击
+            # 💡 【纯鼠标点击方案 - 使用 postMessage 传递数据】
+            # 参考 ui.py 的实现，使用 window.parent.postMessage 传递点击坐标
             import base64
             _, buffer = cv2.imencode('.png', cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
             img_b64 = base64.b64encode(buffer).decode('utf-8')
             h, w = canvas.shape[:2]
             
-            # 创建一个数据框作为点击容器（使用最小尺寸）
-            import pandas as pd
-            df = pd.DataFrame({'点击图片选择点': ['点击左侧红点', '点击鼻梁中点', '点击右侧红点'][:len(st.session_state.click_pts_accumulator)+1]})
-            
-            # 使用 markdown 添加样式化的点击区域
-            html_code = f"""
-            <style>
-                .image-click-wrapper {{
-                    position: relative;
-                    width: 100%;
-                    border: 2px solid #4CAF50;
-                    border-radius: 8px;
-                    overflow: hidden;
-                    cursor: crosshair;
-                }}
-                .image-click-wrapper img {{
-                    display: block;
-                    width: 100%;
-                    height: auto;
-                }}
-                .click-hint {{
-                    position: absolute;
-                    bottom: 8px;
-                    left: 8px;
-                    background: rgba(0,0,0,0.7);
-                    color: white;
-                    padding: 4px 12px;
-                    border-radius: 4px;
-                    font-size: 12px;
-                    pointer-events: none;
-                }}
-            </style>
-            <div class="image-click-wrapper" onclick="handleClick(event, {w}, {h}, '{target_file}')">
-                <img src="data:image/png;base64,{img_b64}" />
-                <div class="click-hint">点击选择点 ({len(st.session_state.click_pts_accumulator)}/3)</div>
-            </div>
-            <script>
-                function handleClick(e, imgW, imgH, fileName) {{
-                    const rect = e.currentTarget.getBoundingClientRect();
-                    const x = Math.round(((e.clientX - rect.left) / rect.width) * imgW);
-                    const y = Math.round(((e.clientY - rect.top) / rect.height) * imgH);
+            # 构建完整的 HTML 页面，包含点击处理逻辑
+            full_html = f"""
+            <html>
+            <head>
+                <style>
+                    body {{ margin: 0; padding: 0; display: flex; flex-direction: column; align-items: center; background: #f8f9fa; }}
+                    #canvas-container {{ position: relative; box-shadow: 0 4px 10px rgba(0,0,0,0.15); border-radius: 8px; overflow: hidden; margin-bottom: 10px; }}
+                    canvas {{ display: block; cursor: crosshair; }}
+                    #info-panel {{ font-size: 14px; font-weight: bold; color: #333; background: #e9ecef; padding: 8px 20px; border-radius: 20px; margin-bottom: 8px; }}
+                    button {{ padding: 6px 15px; background: #dc3545; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: bold; }}
+                    button:hover {{ background: #bd2130; }}
+                    .coord-display {{ font-size: 12px; color: #666; margin-top: 5px; }}
+                </style>
+            </head>
+            <body>
+                <div id="info-panel">📍 请点击【第 {len(st.session_state.click_pts_accumulator)+1} 点】</div>
+                <div id="canvas-container">
+                    <canvas id="paintCanvas"></canvas>
+                </div>
+                <div><button id="resetBtn">🔄 清空重选</button></div>
+                <div class="coord-display" id="coordDisplay"></div>
+
+                <script>
+                    const imgB64 = "data:image/png;base64,{img_b64}";
+                    const canvas = document.getElementById("paintCanvas");
+                    const ctx = canvas.getContext("2d");
+                    const infoPanel = document.getElementById("info-panel");
+                    const resetBtn = document.getElementById("resetBtn");
+                    const coordDisplay = document.getElementById("coordDisplay");
                     
-                    // 使用 URL 参数传递坐标
-                    const params = new URLSearchParams(window.location.search);
-                    params.set('cx', x.toString());
-                    params.set('cy', y.toString());
-                    params.set('cf', fileName);
-                    params.set('ts', Date.now().toString());
+                    let img = new Image();
+                    img.src = imgB64;
                     
-                    // 触发页面刷新
-                    window.location.search = params.toString();
-                }}
-            <\/script>
+                    // 从 URL 获取已有的点
+                    let points = [];
+                    const urlParams = new URLSearchParams(window.location.search);
+                    const existingPts = urlParams.get('pts');
+                    if (existingPts) {{
+                        try {{
+                            points = JSON.parse(decodeURIComponent(existingPts));
+                        }} catch(e) {{}}
+                    }}
+                    
+                    const colors = ["#ff7800", "#00b4ff", "#00ff00"];
+                    const labels = ["1:左侧点", "2:鼻梁中点", "3:右侧点"];
+                    
+                    img.onload = function() {{
+                        canvas.width = img.width;
+                        canvas.height = img.height;
+                        drawAll();
+                    }};
+                    
+                    function drawAll() {{
+                        ctx.drawImage(img, 0, 0);
+                        
+                        // 绘制连线
+                        if (points.length >= 2) {{
+                            ctx.beginPath();
+                            ctx.moveTo(points[0].x, points[0].y);
+                            ctx.lineTo(points[1].x, points[1].y);
+                            if (points.length === 3) {{
+                                ctx.lineTo(points[2].x, points[2].y);
+                            }}
+                            ctx.strokeStyle = "#00a5ff";
+                            ctx.lineWidth = 3;
+                            ctx.stroke();
+                        }}
+                        
+                        // 绘制点
+                        points.forEach((pt, idx) => {{
+                            ctx.beginPath();
+                            ctx.arc(pt.x, pt.y, 6, 0, 2 * Math.PI);
+                            ctx.fillStyle = colors[idx];
+                            ctx.fill();
+                            ctx.strokeStyle = "#000000";
+                            ctx.lineWidth = 1.5;
+                            ctx.stroke();
+                            
+                            ctx.fillStyle = "#ffffff";
+                            ctx.strokeStyle = "#000000";
+                            ctx.lineWidth = 2;
+                            ctx.font = "bold 12px sans-serif";
+                            ctx.strokeText(labels[idx], pt.x + 12, pt.y - 12);
+                            ctx.fillText(labels[idx], pt.x + 12, pt.y - 12);
+                        }});
+                    }}
+                    
+                    canvas.addEventListener("click", function(e) {{
+                        if (points.length >= 3) return;
+                        
+                        const rect = canvas.getBoundingClientRect();
+                        const clickX = Math.round(e.clientX - rect.left);
+                        const clickY = Math.round(e.clientY - rect.top);
+                        
+                        coordDisplay.textContent = `点击坐标: (${clickX}, ${clickY})`;
+                        
+                        // 检查是否与最后一个点太近
+                        if (points.length > 0) {{
+                            const lastPt = points[points.length - 1];
+                            const dist = Math.sqrt(Math.pow(clickX - lastPt.x, 2) + Math.pow(clickY - lastPt.y, 2));
+                            if (dist < 6) return;
+                        }}
+                        
+                        points.push({{ x: clickX, y: clickY }});
+                        drawAll();
+                        
+                        if (points.length === 1) {{
+                            infoPanel.innerHTML = "📍 请点击【第 2 点：鼻梁中间点】";
+                        }} else if (points.length === 2) {{
+                            infoPanel.innerHTML = "📍 请点击【第 3 点：右侧标定点】";
+                        }} else if (points.length === 3) {{
+                            infoPanel.innerHTML = "🎉 选点完成！正在上传...";
+                            infoPanel.style.background = "#d4edda";
+                            infoPanel.style.color = "#155724";
+                        }}
+                        
+                        // 更新 URL 参数
+                        updateURL();
+                    }});
+                    
+                    resetBtn.addEventListener("click", function() {{
+                        points = [];
+                        infoPanel.innerHTML = "📍 请点击【第 1 点：左侧标定点】";
+                        infoPanel.style.background = "#e9ecef";
+                        infoPanel.style.color = "#333";
+                        coordDisplay.textContent = "";
+                        drawAll();
+                        updateURL();
+                    }});
+                    
+                    function updateURL() {{
+                        const urlParams = new URLSearchParams(window.location.search);
+                        if (points.length > 0) {{
+                            urlParams.set('pts', encodeURIComponent(JSON.stringify(points)));
+                        }} else {{
+                            urlParams.delete('pts');
+                        }}
+                        urlParams.set('f', encodeURIComponent('{target_file}'));
+                        window.history.replaceState({{}}, '', window.location.pathname + '?' + urlParams.toString());
+                        
+                        // 强制页面刷新
+                        if (points.length === 3) {{
+                            setTimeout(() => {{
+                                window.location.reload();
+                            }}, 300);
+                        }}
+                    }}
+                <\/script>
+            </body>
+            </html>
             """
-            st.markdown(html_code, unsafe_allow_html=True)
+            
+            # 使用 st.components.v1.html 嵌入 HTML 页面
+            try:
+                import streamlit.components.v1 as components
+                components.html(full_html, height=h + 80, scrolling=True)
+            except Exception as e:
+                # 备用方案：使用 st.markdown
+                st.markdown(full_html, unsafe_allow_html=True)
             
             # 处理 URL 参数传递的点击坐标
-            import urllib.parse
             query_params = st.query_params
-            if 'cx' in query_params and 'cy' in query_params and 'cf' in query_params:
+            if 'pts' in query_params and 'f' in query_params:
                 try:
-                    click_x = int(query_params['cx'])
-                    click_y = int(query_params['cy'])
-                    click_file = urllib.parse.unquote(query_params['cf'])
+                    pts_data = query_params['pts']
+                    click_file = urllib.parse.unquote(query_params['f'])
+                    points = json.loads(urllib.parse.unquote(pts_data))
                     
-                    if click_file == target_file and len(st.session_state.click_pts_accumulator) < 3:
-                        new_pt = (click_x, click_y)
-                        if not st.session_state.click_pts_accumulator or np.linalg.norm(np.array(st.session_state.click_pts_accumulator[-1]) - np.array(new_pt)) > 6:
-                            st.session_state.click_pts_accumulator.append(new_pt)
-                            # 清除 URL 参数
-                            st.query_params.clear()
-                            st.rerun()
+                    if click_file == target_file and len(points) == 3 and len(st.session_state.click_pts_accumulator) < 3:
+                        # 清空原有点并添加新点
+                        st.session_state.click_pts_accumulator = [(p['x'], p['y']) for p in points]
+                        st.toast(f"已接收 {len(points)} 个点")
+                        # 清除 URL 参数
+                        del st.query_params['pts']
+                        del st.query_params['f']
+                        st.rerun()
                 except Exception as e:
-                    pass
+                    st.error(f"解析点数据失败: {str(e)}")
             
             # 显示图片尺寸信息
             st.caption(f"图片尺寸: {w} x {h} 像素")
